@@ -1,0 +1,392 @@
+name: Release
+
+on:
+  repository_dispatch:
+    types: [release]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build (tag or branch)'
+        required: true
+        type: string
+      version:
+        description: 'Version to release (e.g., 0.1.0)'
+        required: true
+        type: string
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: mac
+            arch: arm64
+          - os: macos-13
+            platform: mac
+            arch: x64
+          - os: windows-latest
+            platform: win
+            arch: x64
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Get build parameters
+        id: params
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "ref=${{ github.event.client_payload.ref }}" >> $GITHUB_OUTPUT
+            echo "version=${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "ref=${{ github.event.inputs.ref }}" >> $GITHUB_OUTPUT
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout alma source code
+        uses: actions/checkout@v4
+        with:
+          repository: yetone/alma
+          token: ${{ secrets.ALMA_REPO_TOKEN }}
+          ref: ${{ steps.params.outputs.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-${{ matrix.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.arch }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install
+
+      # macOS: Import certificates for code signing
+      - name: Import macOS certificates
+        if: matrix.platform == 'mac'
+        env:
+          CERTIFICATE_P12: ${{ secrets.MAC_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+        run: |
+          # Create temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          # Create keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import certificate
+          echo "$CERTIFICATE_P12" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Add to search list
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          # Clean up
+          rm -f $RUNNER_TEMP/certificate.p12
+
+      # Build application
+      - name: Build (macOS)
+        if: matrix.platform == 'mac'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
+          VITE_PUBLIC_POSTHOG_KEY: ${{ secrets.VITE_PUBLIC_POSTHOG_KEY }}
+          VITE_PUBLIC_POSTHOG_HOST: ${{ secrets.VITE_PUBLIC_POSTHOG_HOST }}
+        run: pnpm run make -- --${{ matrix.arch }}
+
+      - name: Build (Windows)
+        if: matrix.platform == 'win'
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
+          VITE_PUBLIC_POSTHOG_KEY: ${{ secrets.VITE_PUBLIC_POSTHOG_KEY }}
+          VITE_PUBLIC_POSTHOG_HOST: ${{ secrets.VITE_PUBLIC_POSTHOG_HOST }}
+        run: pnpm run make -- --${{ matrix.arch }}
+
+      - name: Build (Linux)
+        if: matrix.platform == 'linux'
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
+          VITE_PUBLIC_POSTHOG_KEY: ${{ secrets.VITE_PUBLIC_POSTHOG_KEY }}
+          VITE_PUBLIC_POSTHOG_HOST: ${{ secrets.VITE_PUBLIC_POSTHOG_HOST }}
+        run: pnpm run make -- --${{ matrix.arch }}
+
+      # Upload artifacts for the publish job
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            dist-electron/*.dmg
+            dist-electron/*.zip
+            dist-electron/*.exe
+            dist-electron/*.deb
+            dist-electron/*.AppImage
+            dist-electron/*.yml
+            dist-electron/*.blockmap
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Get build parameters
+        id: params
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "ref=${{ github.event.client_payload.ref }}" >> $GITHUB_OUTPUT
+            echo "version=${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "ref=${{ github.event.inputs.ref }}" >> $GITHUB_OUTPUT
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout alma source code
+        uses: actions/checkout@v4
+        with:
+          repository: yetone/alma
+          token: ${{ secrets.ALMA_REPO_TOKEN }}
+          ref: ${{ steps.params.outputs.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Download all build artifacts
+      - name: Download macOS arm64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-mac-arm64
+          path: dist-electron-mac-arm64
+
+      - name: Download macOS x64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-mac-x64
+          path: dist-electron-mac-x64
+
+      - name: Merge macOS artifacts and yml files
+        run: |
+          # Copy all mac artifacts to dist-electron
+          mkdir -p dist-electron
+          cp dist-electron-mac-arm64/*.dmg dist-electron/ 2>/dev/null || true
+          cp dist-electron-mac-arm64/*.zip dist-electron/ 2>/dev/null || true
+          cp dist-electron-mac-arm64/*.blockmap dist-electron/ 2>/dev/null || true
+          cp dist-electron-mac-x64/*.dmg dist-electron/ 2>/dev/null || true
+          cp dist-electron-mac-x64/*.zip dist-electron/ 2>/dev/null || true
+          cp dist-electron-mac-x64/*.blockmap dist-electron/ 2>/dev/null || true
+
+          # Merge latest-mac.yml files
+          ARM64_YML="dist-electron-mac-arm64/latest-mac.yml"
+          X64_YML="dist-electron-mac-x64/latest-mac.yml"
+          MERGED_YML="dist-electron/latest-mac.yml"
+
+          if [ -f "$ARM64_YML" ] && [ -f "$X64_YML" ]; then
+            echo "Merging latest-mac.yml files..."
+
+            VERSION=$(grep "^version:" "$ARM64_YML" | head -1)
+            RELEASE_DATE=$(grep "^releaseDate:" "$ARM64_YML" | head -1)
+
+            ARM64_FILES=$(awk '/^files:/{flag=1; next} /^[a-zA-Z]/ && flag{flag=0} flag' "$ARM64_YML")
+            X64_FILES=$(awk '/^files:/{flag=1; next} /^[a-zA-Z]/ && flag{flag=0} flag' "$X64_YML")
+
+            PATH_LINE=$(grep "^path:" "$ARM64_YML" | head -1)
+            SHA512_LINE=$(grep "^sha512:" "$ARM64_YML" | head -1)
+
+            echo "$VERSION" > "$MERGED_YML"
+            echo "files:" >> "$MERGED_YML"
+            echo "$ARM64_FILES" >> "$MERGED_YML"
+            echo "$X64_FILES" >> "$MERGED_YML"
+            echo "$PATH_LINE" >> "$MERGED_YML"
+            echo "$SHA512_LINE" >> "$MERGED_YML"
+            echo "$RELEASE_DATE" >> "$MERGED_YML"
+
+            echo "Merged latest-mac.yml:"
+            cat "$MERGED_YML"
+          elif [ -f "$ARM64_YML" ]; then
+            cp "$ARM64_YML" "$MERGED_YML"
+            echo "Only arm64 yml found, using it directly"
+          elif [ -f "$X64_YML" ]; then
+            cp "$X64_YML" "$MERGED_YML"
+            echo "Only x64 yml found, using it directly"
+          fi
+
+          rm -rf dist-electron-mac-arm64 dist-electron-mac-x64
+
+      - name: Download Windows x64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-win-x64
+          path: dist-electron
+
+      - name: Download Linux x64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-linux-x64
+          path: dist-electron
+
+      - name: List artifacts
+        run: ls -la dist-electron/
+
+      # Upload to Cloudflare R2
+      - name: Configure AWS CLI for R2
+        run: |
+          aws configure set aws_access_key_id ${{ secrets.R2_ACCESS_KEY_ID }}
+          aws configure set aws_secret_access_key ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          aws configure set default.region auto
+
+      - name: Upload to Cloudflare R2
+        env:
+          R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+        run: |
+          for file in dist-electron/*; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              echo "Uploading $filename..."
+              aws s3 cp "$file" "s3://alma-updates/$filename" \
+                --endpoint-url "$R2_ENDPOINT"
+            fi
+          done
+          echo "All files uploaded to R2!"
+
+      # Generate changelog
+      - name: Get previous tag
+        id: prev_tag
+        run: |
+          CURRENT_TAG="v${{ steps.params.outputs.version }}"
+          PREV_TAG=$(git tag --sort=-v:refname | grep -A1 "^${CURRENT_TAG}$" | tail -1)
+          if [ "$PREV_TAG" = "$CURRENT_TAG" ] || [ -z "$PREV_TAG" ]; then
+            PREV_TAG=$(git tag --sort=-v:refname | head -2 | tail -1)
+          fi
+          if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "$CURRENT_TAG" ]; then
+            PREV_TAG=$(git rev-list --max-parents=0 HEAD)
+          fi
+          echo "prev_tag=$PREV_TAG" >> $GITHUB_OUTPUT
+          echo "Previous tag: $PREV_TAG"
+
+      - name: Generate changelog with LLM
+        id: changelog
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          CURRENT_TAG="v${{ steps.params.outputs.version }}"
+          echo "Fetching commits between ${{ steps.prev_tag.outputs.prev_tag }} and $CURRENT_TAG"
+          COMMITS=$(git log ${{ steps.prev_tag.outputs.prev_tag }}..$CURRENT_TAG --pretty=format:"%s" --no-merges 2>/dev/null || git log --pretty=format:"%s" --no-merges -20)
+
+          echo "Found commits:"
+          echo "$COMMITS"
+
+          if [ -z "$COMMITS" ]; then
+            echo "No commits found, using fallback"
+            echo "### Changes" > /tmp/changelog.md
+            echo "" >> /tmp/changelog.md
+            echo "- Various improvements and bug fixes" >> /tmp/changelog.md
+            exit 0
+          fi
+
+          PROMPT=$(cat <<PROMPT_EOF
+          Based on the following git commit messages, generate a concise and user-friendly changelog in markdown format. Group changes by category (e.g., Features, Bug Fixes, Improvements). Only include meaningful changes, skip trivial commits. Use clear, non-technical language where possible. Output ONLY the changelog content without any preamble.
+
+          Commit messages:
+          $COMMITS
+          PROMPT_EOF
+          )
+
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "$(jq -n --arg prompt "$PROMPT" '{
+              "model": "claude-sonnet-4-20250514",
+              "max_tokens": 1024,
+              "messages": [{"role": "user", "content": $prompt}]
+            }')")
+
+          CHANGELOG=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
+
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG=$(cat <<FALLBACK_EOF
+          ### Changes
+          $COMMITS
+          FALLBACK_EOF
+            )
+          fi
+
+          echo "$CHANGELOG" > /tmp/changelog.md
+          echo "Generated changelog:"
+          cat /tmp/changelog.md
+
+      - name: Update latest.yml files with changelog
+        run: |
+          CHANGELOG=$(cat /tmp/changelog.md)
+          VERSION="v${{ steps.params.outputs.version }}"
+
+          for yml_file in dist-electron/*.yml; do
+            if [ -f "$yml_file" ]; then
+              echo "" >> "$yml_file"
+              echo "releaseNotes: |" >> "$yml_file"
+              while IFS= read -r line; do
+                echo "  $line" >> "$yml_file"
+              done < /tmp/changelog.md
+              echo "Updated $yml_file with release notes"
+            fi
+          done
+
+      - name: Re-upload updated yml files to R2
+        env:
+          R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+        run: |
+          for yml_file in dist-electron/*.yml; do
+            if [ -f "$yml_file" ]; then
+              filename=$(basename "$yml_file")
+              echo "Re-uploading $filename with release notes..."
+              aws s3 cp "$yml_file" "s3://alma-updates/$filename" \
+                --endpoint-url "$R2_ENDPOINT"
+            fi
+          done
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.params.outputs.version }}
+          name: Alma v${{ steps.params.outputs.version }}
+          draft: false
+          generate_release_notes: false
+          body_path: /tmp/changelog.md
+          files: |
+            dist-electron/*.dmg
+            dist-electron/*.zip
+            dist-electron/*.exe
+            dist-electron/*.deb
+            dist-electron/*.AppImage
+            dist-electron/*.yml
+            dist-electron/*.blockmap
