@@ -23,7 +23,7 @@ jobs:
           - os: macos-latest
             platform: mac
             arch: arm64
-          - os: macos-13
+          - os: macos-15-intel
             platform: mac
             arch: x64
           - os: windows-latest
@@ -108,6 +108,26 @@ jobs:
           # Clean up
           rm -f $RUNNER_TEMP/certificate.p12
 
+      # Debug: Check sqlite-vec installation
+      - name: Debug sqlite-vec installation
+        if: matrix.platform == 'mac'
+        shell: bash
+        run: |
+          echo "=== Checking sqlite-vec packages ==="
+          ls -la node_modules/ | grep sqlite-vec || echo "No sqlite-vec packages found"
+          echo ""
+          echo "=== sqlite-vec main package ==="
+          ls -la node_modules/sqlite-vec/ || echo "sqlite-vec not found"
+          echo ""
+          echo "=== sqlite-vec-darwin-arm64 package ==="
+          ls -la node_modules/sqlite-vec-darwin-arm64/ || echo "sqlite-vec-darwin-arm64 not found"
+          echo ""
+          echo "=== sqlite-vec-darwin-x64 package ==="
+          ls -la node_modules/sqlite-vec-darwin-x64/ || echo "sqlite-vec-darwin-x64 not found"
+          echo ""
+          echo "=== Looking for vec0.dylib files ==="
+          find node_modules -name "vec0.*" 2>/dev/null || echo "No vec0 files found"
+
       # Build application
       - name: Build (macOS)
         if: matrix.platform == 'mac'
@@ -120,6 +140,37 @@ jobs:
           VITE_PUBLIC_POSTHOG_KEY: ${{ secrets.VITE_PUBLIC_POSTHOG_KEY }}
           VITE_PUBLIC_POSTHOG_HOST: ${{ secrets.VITE_PUBLIC_POSTHOG_HOST }}
         run: pnpm run make -- --${{ matrix.arch }}
+
+      # Debug: Check packaged app structure
+      - name: Debug packaged app (macOS)
+        if: matrix.platform == 'mac'
+        shell: bash
+        run: |
+          echo "=== Checking packaged app structure ==="
+          APP_PATH=$(find dist-electron -name "*.app" -type d | head -1)
+          if [ -n "$APP_PATH" ]; then
+            echo "App found at: $APP_PATH"
+            echo ""
+            echo "=== Resources directory ==="
+            ls -la "$APP_PATH/Contents/Resources/" || echo "Resources not found"
+            echo ""
+            echo "=== app.asar.unpacked structure ==="
+            ls -laR "$APP_PATH/Contents/Resources/app.asar.unpacked/" 2>/dev/null || echo "app.asar.unpacked not found"
+            echo ""
+            echo "=== Looking for vec0 files in packaged app ==="
+            find "$APP_PATH" -name "vec0.*" 2>/dev/null || echo "No vec0 files found in packaged app"
+            echo ""
+            echo "=== Checking vec0.dylib signature ==="
+            VEC_PATH=$(find "$APP_PATH" -name "vec0.dylib" | head -1)
+            if [ -n "$VEC_PATH" ]; then
+              codesign -dv "$VEC_PATH" 2>&1 || echo "Failed to check signature"
+            else
+              echo "vec0.dylib not found in packaged app"
+            fi
+          else
+            echo "No .app directory found"
+            ls -la dist-electron/
+          fi
 
       - name: Build (Windows)
         if: matrix.platform == 'win'
