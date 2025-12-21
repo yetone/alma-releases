@@ -132,6 +132,7 @@ jobs:
       - name: Build (macOS)
         if: matrix.platform == 'mac'
         env:
+          NODE_OPTIONS: --max_old_space_size=8192
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -176,6 +177,7 @@ jobs:
       - name: Build (Windows)
         if: matrix.platform == 'win'
         env:
+          NODE_OPTIONS: --max_old_space_size=8192
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
@@ -186,6 +188,7 @@ jobs:
       - name: Build (Linux)
         if: matrix.platform == 'linux'
         env:
+          NODE_OPTIONS: --max_old_space_size=8192
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
