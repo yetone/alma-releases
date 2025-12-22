@@ -32,9 +32,6 @@ jobs:
           - os: ubuntu-latest
             platform: linux
             arch: x64
-          - os: ubuntu-24.04-arm
-            platform: linux
-            arch: arm64
 
     runs-on: ${{ matrix.os }}
 
@@ -311,7 +308,7 @@ jobs:
       - name: Download Linux artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          pattern: build-linux-*  # arch = x64 and arm64
+          pattern: build-linux-*
           path: dist-electron
 
       - name: List artifacts
