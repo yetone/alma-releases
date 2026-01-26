@@ -305,10 +305,10 @@ jobs:
           name: build-win-x64
           path: dist-electron
 
-      - name: Download Linux artifacts
+      - name: Download Linux x64 artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          pattern: build-linux-*
+          name: build-linux-x64
           path: dist-electron
 
       - name: List artifacts
