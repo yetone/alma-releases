@@ -79,7 +79,7 @@ jobs:
             ${{ runner.os }}-${{ matrix.arch }}-pnpm-store-
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       # macOS: Import certificates for code signing
       - name: Import macOS certificates
@@ -108,87 +108,13 @@ jobs:
           # Clean up
           rm -f $RUNNER_TEMP/certificate.p12
 
-      # Debug: Check sqlite-vec installation
-      - name: Debug sqlite-vec installation
-        if: matrix.platform == 'mac'
-        shell: bash
-        run: |
-          echo "=== Checking sqlite-vec packages ==="
-          ls -la node_modules/ | grep sqlite-vec || echo "No sqlite-vec packages found"
-          echo ""
-          echo "=== sqlite-vec main package ==="
-          ls -la node_modules/sqlite-vec/ || echo "sqlite-vec not found"
-          echo ""
-          echo "=== sqlite-vec-darwin-arm64 package ==="
-          ls -la node_modules/sqlite-vec-darwin-arm64/ || echo "sqlite-vec-darwin-arm64 not found"
-          echo ""
-          echo "=== sqlite-vec-darwin-x64 package ==="
-          ls -la node_modules/sqlite-vec-darwin-x64/ || echo "sqlite-vec-darwin-x64 not found"
-          echo ""
-          echo "=== Looking for vec0.dylib files ==="
-          find node_modules -name "vec0.*" 2>/dev/null || echo "No vec0 files found"
-
       # Build application
-      - name: Build (macOS)
-        if: matrix.platform == 'mac'
+      - name: Build
         env:
           NODE_OPTIONS: --max_old_space_size=8192
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-          VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          VITE_PUBLIC_POSTHOG_KEY: ${{ secrets.VITE_PUBLIC_POSTHOG_KEY }}
-          VITE_PUBLIC_POSTHOG_HOST: ${{ secrets.VITE_PUBLIC_POSTHOG_HOST }}
-        run: pnpm run make -- --${{ matrix.arch }}
-
-      # Debug: Check packaged app structure
-      - name: Debug packaged app (macOS)
-        if: matrix.platform == 'mac'
-        shell: bash
-        run: |
-          echo "=== Checking packaged app structure ==="
-          APP_PATH=$(find dist-electron -name "*.app" -type d | head -1)
-          if [ -n "$APP_PATH" ]; then
-            echo "App found at: $APP_PATH"
-            echo ""
-            echo "=== Resources directory ==="
-            ls -la "$APP_PATH/Contents/Resources/" || echo "Resources not found"
-            echo ""
-            echo "=== app.asar.unpacked structure ==="
-            ls -laR "$APP_PATH/Contents/Resources/app.asar.unpacked/" 2>/dev/null || echo "app.asar.unpacked not found"
-            echo ""
-            echo "=== Looking for vec0 files in packaged app ==="
-            find "$APP_PATH" -name "vec0.*" 2>/dev/null || echo "No vec0 files found in packaged app"
-            echo ""
-            echo "=== Checking vec0.dylib signature ==="
-            VEC_PATH=$(find "$APP_PATH" -name "vec0.dylib" | head -1)
-            if [ -n "$VEC_PATH" ]; then
-              codesign -dv "$VEC_PATH" 2>&1 || echo "Failed to check signature"
-            else
-              echo "vec0.dylib not found in packaged app"
-            fi
-          else
-            echo "No .app directory found"
-            ls -la dist-electron/
-          fi
-
-      - name: Build (Windows)
-        if: matrix.platform == 'win'
-        env:
-          NODE_OPTIONS: --max_old_space_size=8192
-          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-          VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          VITE_PUBLIC_POSTHOG_KEY: ${{ secrets.VITE_PUBLIC_POSTHOG_KEY }}
-          VITE_PUBLIC_POSTHOG_HOST: ${{ secrets.VITE_PUBLIC_POSTHOG_HOST }}
-        run: pnpm run make -- --${{ matrix.arch }}
-
-      - name: Build (Linux)
-        if: matrix.platform == 'linux'
-        env:
-          NODE_OPTIONS: --max_old_space_size=8192
+          APPLE_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
@@ -238,33 +164,27 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      # Download all build artifacts
-      - name: Download macOS arm64 artifacts
+      # Download all build artifacts at once
+      - name: Download all artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: build-mac-arm64
-          path: dist-electron-mac-arm64
+          path: dist-artifacts
 
-      - name: Download macOS x64 artifacts
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          name: build-mac-x64
-          path: dist-electron-mac-x64
-
-      - name: Merge macOS artifacts and yml files
+      - name: Merge artifacts and macOS yml files
         run: |
-          # Copy all mac artifacts to dist-electron
           mkdir -p dist-electron
-          cp dist-electron-mac-arm64/*.dmg dist-electron/ 2>/dev/null || true
-          cp dist-electron-mac-arm64/*.zip dist-electron/ 2>/dev/null || true
-          cp dist-electron-mac-arm64/*.blockmap dist-electron/ 2>/dev/null || true
-          cp dist-electron-mac-x64/*.dmg dist-electron/ 2>/dev/null || true
-          cp dist-electron-mac-x64/*.zip dist-electron/ 2>/dev/null || true
-          cp dist-electron-mac-x64/*.blockmap dist-electron/ 2>/dev/null || true
+
+          # Copy mac artifacts
+          cp dist-artifacts/build-mac-arm64/*.dmg dist-electron/ 2>/dev/null || true
+          cp dist-artifacts/build-mac-arm64/*.zip dist-electron/ 2>/dev/null || true
+          cp dist-artifacts/build-mac-arm64/*.blockmap dist-electron/ 2>/dev/null || true
+          cp dist-artifacts/build-mac-x64/*.dmg dist-electron/ 2>/dev/null || true
+          cp dist-artifacts/build-mac-x64/*.zip dist-electron/ 2>/dev/null || true
+          cp dist-artifacts/build-mac-x64/*.blockmap dist-electron/ 2>/dev/null || true
 
           # Merge latest-mac.yml files
-          ARM64_YML="dist-electron-mac-arm64/latest-mac.yml"
-          X64_YML="dist-electron-mac-x64/latest-mac.yml"
+          ARM64_YML="dist-artifacts/build-mac-arm64/latest-mac.yml"
+          X64_YML="dist-artifacts/build-mac-x64/latest-mac.yml"
           MERGED_YML="dist-electron/latest-mac.yml"
 
           if [ -f "$ARM64_YML" ] && [ -f "$X64_YML" ]; then
@@ -291,51 +211,19 @@ jobs:
             cat "$MERGED_YML"
           elif [ -f "$ARM64_YML" ]; then
             cp "$ARM64_YML" "$MERGED_YML"
-            echo "Only arm64 yml found, using it directly"
           elif [ -f "$X64_YML" ]; then
             cp "$X64_YML" "$MERGED_YML"
-            echo "Only x64 yml found, using it directly"
           fi
 
-          rm -rf dist-electron-mac-arm64 dist-electron-mac-x64
+          # Copy win & linux artifacts
+          cp dist-artifacts/build-win-x64/* dist-electron/ 2>/dev/null || true
+          cp dist-artifacts/build-linux-x64/* dist-electron/ 2>/dev/null || true
 
-      - name: Download Windows x64 artifacts
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          name: build-win-x64
-          path: dist-electron
+          rm -rf dist-artifacts
+          echo "=== All artifacts ==="
+          ls -la dist-electron/
 
-      - name: Download Linux x64 artifacts
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          name: build-linux-x64
-          path: dist-electron
-
-      - name: List artifacts
-        run: ls -la dist-electron/
-
-      # Upload to Cloudflare R2
-      - name: Configure AWS CLI for R2
-        run: |
-          aws configure set aws_access_key_id ${{ secrets.R2_ACCESS_KEY_ID }}
-          aws configure set aws_secret_access_key ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          aws configure set default.region auto
-
-      - name: Upload to Cloudflare R2
-        env:
-          R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
-        run: |
-          for file in dist-electron/*; do
-            if [ -f "$file" ]; then
-              filename=$(basename "$file")
-              echo "Uploading $filename..."
-              aws s3 cp "$file" "s3://alma-updates/$filename" \
-                --endpoint-url "$R2_ENDPOINT"
-            fi
-          done
-          echo "All files uploaded to R2!"
-
-      # Generate changelog
+      # Generate changelog BEFORE uploading so we only upload yml files once
       - name: Get previous tag
         id: prev_tag
         run: |
@@ -404,9 +292,6 @@ jobs:
 
       - name: Update latest.yml files with changelog
         run: |
-          CHANGELOG=$(cat /tmp/changelog.md)
-          VERSION="v${{ steps.params.outputs.version }}"
-
           for yml_file in dist-electron/*.yml; do
             if [ -f "$yml_file" ]; then
               echo "" >> "$yml_file"
@@ -418,18 +303,23 @@ jobs:
             fi
           done
 
-      - name: Re-upload updated yml files to R2
+      # Upload to Cloudflare R2 (all files in parallel)
+      - name: Configure AWS CLI for R2
+        run: |
+          aws configure set aws_access_key_id ${{ secrets.R2_ACCESS_KEY_ID }}
+          aws configure set aws_secret_access_key ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          aws configure set default.region auto
+
+      - name: Upload to Cloudflare R2
         env:
           R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
         run: |
-          for yml_file in dist-electron/*.yml; do
-            if [ -f "$yml_file" ]; then
-              filename=$(basename "$yml_file")
-              echo "Re-uploading $filename with release notes..."
-              aws s3 cp "$yml_file" "s3://alma-updates/$filename" \
-                --endpoint-url "$R2_ENDPOINT"
-            fi
-          done
+          ls dist-electron/ | xargs -P 4 -I {} sh -c '
+            echo "Uploading {}..."
+            aws s3 cp "dist-electron/{}" "s3://alma-updates/{}" \
+              --endpoint-url "'"$R2_ENDPOINT"'"
+          '
+          echo "All files uploaded to R2!"
 
       - name: Create Release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
