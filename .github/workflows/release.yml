@@ -274,7 +274,7 @@ jobs:
               "input": [{"role": "user", "content": $prompt}]
             }')")
 
-          CHANGELOG=$(echo "$RESPONSE" | jq -r '.output_text // empty')
+          CHANGELOG=$(echo "$RESPONSE" | jq -r '.output[0].content[0].text // empty')
 
           if [ -z "$CHANGELOG" ]; then
             CHANGELOG=$(cat <<FALLBACK_EOF
