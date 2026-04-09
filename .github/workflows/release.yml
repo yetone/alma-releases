@@ -335,3 +335,27 @@ jobs:
             dist-electron/*.AppImage
             dist-electron/*.yml
             dist-electron/*.blockmap
+
+      - name: Post to Discord #release-notes
+        if: success()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
+        run: |
+          VERSION="v${{ steps.params.outputs.version }}"
+          CHANGELOG=$(cat /tmp/changelog.md)
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${VERSION}"
+
+          # Discord message has a 2000 char limit, truncate if needed
+          MESSAGE="## Alma ${VERSION}
+
+          ${CHANGELOG}
+
+          **Download:** ${RELEASE_URL}"
+
+          # Trim to Discord limit
+          if [ ${#MESSAGE} -gt 1990 ]; then
+            MESSAGE="${MESSAGE:0:1987}..."
+          fi
+
+          jq -n --arg content "$MESSAGE" '{content: $content}' | \
+            curl -sf -H "Content-Type: application/json" -d @- "$DISCORD_WEBHOOK_URL"
