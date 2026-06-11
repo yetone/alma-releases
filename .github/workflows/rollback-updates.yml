@@ -1,0 +1,48 @@
+name: Rollback update channel
+
+# Re-points the auto-update feed (latest*.yml on Cloudflare R2) at a
+# previously published release, without rebuilding anything. Use when a
+# bad version reached the update channel and users must stop receiving it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to roll the update channel back to (e.g., 0.0.814)'
+        required: true
+        type: string
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download latest*.yml from release v${{ github.event.inputs.version }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p ymls
+          gh release download "v${{ github.event.inputs.version }}" \
+            --repo "${{ github.repository }}" \
+            --pattern 'latest*.yml' \
+            --dir ymls
+          echo "=== Files to restore ==="
+          ls -la ymls/
+          grep -H '^version:' ymls/*.yml
+
+      - name: Configure AWS CLI for R2
+        run: |
+          aws configure set aws_access_key_id ${{ secrets.R2_ACCESS_KEY_ID }}
+          aws configure set aws_secret_access_key ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          aws configure set default.region auto
+
+      - name: Upload yml files to Cloudflare R2
+        env:
+          R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+        run: |
+          for f in ymls/latest*.yml; do
+            echo "Uploading $(basename "$f")..."
+            aws s3 cp "$f" "s3://alma-updates/$(basename "$f")" \
+              --endpoint-url "$R2_ENDPOINT"
+          done
+          echo "Update channel rolled back to v${{ github.event.inputs.version }}"
