@@ -277,7 +277,9 @@ jobs:
               "messages": [{"role": "user", "content": $prompt}]
             }')")
 
-          CHANGELOG=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty')
+          # DeepSeek responses can contain raw (unescaped) newlines inside JSON
+          # strings, which strict parsers like jq reject; python strict=False allows them.
+          CHANGELOG=$(echo "$RESPONSE" | python3 -c 'import json,sys; d=json.loads(sys.stdin.read(), strict=False); print(d["choices"][0]["message"]["content"])' 2>/dev/null || true)
 
           if [ -z "$CHANGELOG" ]; then
             echo "::warning::LLM changelog generation failed, falling back to raw commit list. API response:"
