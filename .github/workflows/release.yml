@@ -244,7 +244,7 @@ jobs:
       - name: Generate changelog with LLM
         id: changelog
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           CURRENT_TAG="v${{ steps.params.outputs.version }}"
           echo "Fetching commits between ${{ steps.prev_tag.outputs.prev_tag }} and $CURRENT_TAG"
@@ -269,17 +269,19 @@ jobs:
           PROMPT_EOF
           )
 
-          RESPONSE=$(curl -s https://api.openai.com/v1/responses \
+          RESPONSE=$(curl -s https://api.deepseek.com/chat/completions \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
             -d "$(jq -n --arg prompt "$PROMPT" '{
-              "model": "gpt-5.4",
-              "input": [{"role": "user", "content": $prompt}]
+              "model": "deepseek-v4-pro",
+              "messages": [{"role": "user", "content": $prompt}]
             }')")
 
-          CHANGELOG=$(echo "$RESPONSE" | jq -r '.output[0].content[0].text // empty')
+          CHANGELOG=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty')
 
           if [ -z "$CHANGELOG" ]; then
+            echo "::warning::LLM changelog generation failed, falling back to raw commit list. API response:"
+            echo "$RESPONSE"
             CHANGELOG=$(cat <<FALLBACK_EOF
           ### Changes
           $COMMITS
