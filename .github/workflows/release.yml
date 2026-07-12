@@ -84,6 +84,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Linux: rpmbuild is required by the electron-builder rpm target
+      - name: Install rpm tooling
+        if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y rpm
+
       # macOS: Import certificates for code signing
       - name: Import macOS certificates
         if: matrix.platform == 'mac'
@@ -135,6 +140,7 @@ jobs:
             dist-electron/*.zip
             dist-electron/*.exe
             dist-electron/*.deb
+            dist-electron/*.rpm
             dist-electron/*.AppImage
             dist-electron/*.yml
             dist-electron/*.blockmap
@@ -339,6 +345,7 @@ jobs:
             dist-electron/*.zip
             dist-electron/*.exe
             dist-electron/*.deb
+            dist-electron/*.rpm
             dist-electron/*.AppImage
             dist-electron/*.yml
             dist-electron/*.blockmap
