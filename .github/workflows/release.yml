@@ -351,6 +351,10 @@ jobs:
             dist-electron/*.blockmap
 
       - name: Post to Discord #release-notes
+        # A webhook hiccup must not mark a completed release as failed — by this
+        # point the R2 feed and GitHub release are already live (v0.0.975 was
+        # fully published yet showed as 'failure' because only this step 4xx'd).
+        continue-on-error: true
         if: success()
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
