@@ -1,0 +1,275 @@
+name: Publish Platform
+
+# Reusable per-platform publish. The win/linux leg goes live as soon as those
+# builds finish (~25min); the mac leg follows when both mac builds are done.
+# Feeds are per-platform files (latest.yml / latest-linux.yml / latest-mac.yml),
+# so partial publishes are safe: each leg only touches its own feed files.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      artifact_pattern:
+        description: 'Artifact name glob to download (e.g. build-mac-*)'
+        required: true
+        type: string
+      announce:
+        description: 'Post the Discord release note (mac leg only — it lands last)'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout alma source code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          repository: yetone/alma
+          token: ${{ secrets.ALMA_REPO_TOKEN }}
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Download only this leg's artifacts (build-mac-* or build-win/linux-*)
+      - name: Download artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          path: dist-artifacts
+          pattern: ${{ inputs.artifact_pattern }}
+
+      # Belt and braces: whatever the download pattern matched, a leg must
+      # never publish the other leg's files — a win/linux publish that caught a
+      # freshly-finished mac-arm64 artifact would write a latest-mac.yml with
+      # only ONE architecture, breaking updates for the other.
+      - name: Enforce leg isolation
+        run: |
+          case "${{ inputs.artifact_pattern }}" in
+            build-mac-*)
+              rm -rf dist-artifacts/build-win-* dist-artifacts/build-linux-*
+              # The mac feed lists BOTH architectures; publishing with one
+              # missing would break updates for the other.
+              if [ ! -f dist-artifacts/build-mac-arm64/latest-mac.yml ] || [ ! -f dist-artifacts/build-mac-x64/latest-mac.yml ]; then
+                echo "::error::mac publish requires both arm64 and x64 artifacts"
+                exit 1
+              fi
+              ;;
+            *) rm -rf dist-artifacts/build-mac-* ;;
+          esac
+          # An empty download (e.g. a glob that matched nothing) must fail loudly,
+          # not silently publish nothing.
+          if [ -z "$(ls -A dist-artifacts 2>/dev/null)" ]; then
+            echo "::error::no artifacts matched pattern ${{ inputs.artifact_pattern }}"
+            exit 1
+          fi
+          ls dist-artifacts/
+
+      - name: Merge artifacts and macOS yml files
+        run: |
+          mkdir -p dist-electron
+
+          # Copy mac artifacts
+          cp dist-artifacts/build-mac-arm64/*.dmg dist-electron/ 2>/dev/null || true
+          cp dist-artifacts/build-mac-arm64/*.zip dist-electron/ 2>/dev/null || true
+          cp dist-artifacts/build-mac-arm64/*.blockmap dist-electron/ 2>/dev/null || true
+          cp dist-artifacts/build-mac-x64/*.dmg dist-electron/ 2>/dev/null || true
+          cp dist-artifacts/build-mac-x64/*.zip dist-electron/ 2>/dev/null || true
+          cp dist-artifacts/build-mac-x64/*.blockmap dist-electron/ 2>/dev/null || true
+
+          # Merge latest-mac.yml files
+          ARM64_YML="dist-artifacts/build-mac-arm64/latest-mac.yml"
+          X64_YML="dist-artifacts/build-mac-x64/latest-mac.yml"
+          MERGED_YML="dist-electron/latest-mac.yml"
+
+          if [ -f "$ARM64_YML" ] && [ -f "$X64_YML" ]; then
+            echo "Merging latest-mac.yml files..."
+
+            VERSION=$(grep "^version:" "$ARM64_YML" | head -1)
+            RELEASE_DATE=$(grep "^releaseDate:" "$ARM64_YML" | head -1)
+
+            ARM64_FILES=$(awk '/^files:/{flag=1; next} /^[a-zA-Z]/ && flag{flag=0} flag' "$ARM64_YML")
+            X64_FILES=$(awk '/^files:/{flag=1; next} /^[a-zA-Z]/ && flag{flag=0} flag' "$X64_YML")
+
+            PATH_LINE=$(grep "^path:" "$ARM64_YML" | head -1)
+            SHA512_LINE=$(grep "^sha512:" "$ARM64_YML" | head -1)
+
+            echo "$VERSION" > "$MERGED_YML"
+            echo "files:" >> "$MERGED_YML"
+            echo "$ARM64_FILES" >> "$MERGED_YML"
+            echo "$X64_FILES" >> "$MERGED_YML"
+            echo "$PATH_LINE" >> "$MERGED_YML"
+            echo "$SHA512_LINE" >> "$MERGED_YML"
+            echo "$RELEASE_DATE" >> "$MERGED_YML"
+
+            echo "Merged latest-mac.yml:"
+            cat "$MERGED_YML"
+          elif [ -f "$ARM64_YML" ]; then
+            cp "$ARM64_YML" "$MERGED_YML"
+          elif [ -f "$X64_YML" ]; then
+            cp "$X64_YML" "$MERGED_YML"
+          fi
+
+          # Copy win & linux artifacts
+          cp dist-artifacts/build-win-x64/* dist-electron/ 2>/dev/null || true
+          cp dist-artifacts/build-linux-x64/* dist-electron/ 2>/dev/null || true
+
+          rm -rf dist-artifacts
+          echo "=== All artifacts ==="
+          ls -la dist-electron/
+
+      # Generate changelog BEFORE uploading so we only upload yml files once
+      - name: Get previous tag
+        id: prev_tag
+        run: |
+          CURRENT_TAG="v${{ inputs.version }}"
+          PREV_TAG=$(git tag --sort=-v:refname | grep -A1 "^${CURRENT_TAG}$" | tail -1)
+          if [ "$PREV_TAG" = "$CURRENT_TAG" ] || [ -z "$PREV_TAG" ]; then
+            PREV_TAG=$(git tag --sort=-v:refname | head -2 | tail -1)
+          fi
+          if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "$CURRENT_TAG" ]; then
+            PREV_TAG=$(git rev-list --max-parents=0 HEAD)
+          fi
+          echo "prev_tag=$PREV_TAG" >> $GITHUB_OUTPUT
+          echo "Previous tag: $PREV_TAG"
+
+      - name: Generate changelog with LLM
+        id: changelog
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          CURRENT_TAG="v${{ inputs.version }}"
+          echo "Fetching commits between ${{ steps.prev_tag.outputs.prev_tag }} and $CURRENT_TAG"
+          COMMITS=$(git log ${{ steps.prev_tag.outputs.prev_tag }}..$CURRENT_TAG --pretty=format:"%s" --no-merges 2>/dev/null || git log --pretty=format:"%s" --no-merges -20)
+
+          echo "Found commits:"
+          echo "$COMMITS"
+
+          if [ -z "$COMMITS" ]; then
+            echo "No commits found, using fallback"
+            echo "### Changes" > /tmp/changelog.md
+            echo "" >> /tmp/changelog.md
+            echo "- Various improvements and bug fixes" >> /tmp/changelog.md
+            exit 0
+          fi
+
+          PROMPT=$(cat <<PROMPT_EOF
+          Based on the following git commit messages, generate a concise and user-friendly changelog in markdown format. Group changes by category (e.g., Features, Bug Fixes, Improvements). Only include meaningful changes, skip trivial commits. Use clear, non-technical language where possible. Output ONLY the changelog content without any preamble.
+
+          Commit messages:
+          $COMMITS
+          PROMPT_EOF
+          )
+
+          RESPONSE=$(curl -s https://api.deepseek.com/chat/completions \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+            -d "$(jq -n --arg prompt "$PROMPT" '{
+              "model": "deepseek-v4-pro",
+              "messages": [{"role": "user", "content": $prompt}]
+            }')")
+
+          # DeepSeek responses can contain raw (unescaped) newlines inside JSON
+          # strings, which strict parsers like jq reject; python strict=False allows them.
+          CHANGELOG=$(echo "$RESPONSE" | python3 -c 'import json,sys; d=json.loads(sys.stdin.read(), strict=False); print(d["choices"][0]["message"]["content"])' 2>/dev/null || true)
+
+          if [ -z "$CHANGELOG" ]; then
+            echo "::warning::LLM changelog generation failed, falling back to raw commit list. API response:"
+            echo "$RESPONSE"
+            CHANGELOG=$(cat <<FALLBACK_EOF
+          ### Changes
+          $COMMITS
+          FALLBACK_EOF
+            )
+          fi
+
+          echo "$CHANGELOG" > /tmp/changelog.md
+          echo "Generated changelog:"
+          cat /tmp/changelog.md
+
+      - name: Update latest.yml files with changelog
+        run: |
+          for yml_file in dist-electron/*.yml; do
+            if [ -f "$yml_file" ]; then
+              echo "" >> "$yml_file"
+              echo "releaseNotes: |" >> "$yml_file"
+              while IFS= read -r line; do
+                echo "  $line" >> "$yml_file"
+              done < /tmp/changelog.md
+              echo "Updated $yml_file with release notes"
+            fi
+          done
+
+      # Upload to Cloudflare R2 (all files in parallel)
+      - name: Configure AWS CLI for R2
+        run: |
+          aws configure set aws_access_key_id ${{ secrets.R2_ACCESS_KEY_ID }}
+          aws configure set aws_secret_access_key ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          aws configure set default.region auto
+
+      - name: Upload to Cloudflare R2
+        env:
+          R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+        run: |
+          ls dist-electron/ | xargs -P 4 -I {} sh -c '
+            echo "Uploading {}..."
+            aws s3 cp "dist-electron/{}" "s3://alma-updates/{}" \
+              --endpoint-url "'"$R2_ENDPOINT"'"
+          '
+          echo "All files uploaded to R2!"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        with:
+          tag_name: v${{ inputs.version }}
+          name: Alma v${{ inputs.version }}
+          draft: false
+          generate_release_notes: false
+          body_path: /tmp/changelog.md
+          files: |
+            dist-electron/*.dmg
+            dist-electron/*.zip
+            dist-electron/*.exe
+            dist-electron/*.deb
+            dist-electron/*.rpm
+            dist-electron/*.AppImage
+            dist-electron/*.yml
+            dist-electron/*.blockmap
+
+      - name: Post to Discord #release-notes
+        # Only the mac leg announces — it finishes last, so the release is
+        # complete (all platforms live) by the time the message lands.
+        # A webhook hiccup must not mark a completed release as failed — by this
+        # point the R2 feed and GitHub release are already live (v0.0.975 was
+        # fully published yet showed as 'failure' because only this step 4xx'd).
+        continue-on-error: true
+        if: success() && inputs.announce
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
+        run: |
+          VERSION="v${{ inputs.version }}"
+          CHANGELOG=$(cat /tmp/changelog.md)
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${VERSION}"
+
+          # Discord message has a 2000 char limit, truncate if needed
+          MESSAGE="## Alma ${VERSION}
+
+          ${CHANGELOG}
+
+          **Download:** ${RELEASE_URL}"
+
+          # Trim to Discord limit
+          if [ ${#MESSAGE} -gt 1990 ]; then
+            MESSAGE="${MESSAGE:0:1987}..."
+          fi
+
+          jq -n --arg content "$MESSAGE" '{content: $content}' | \
+            curl -sf -H "Content-Type: application/json" -d @- "$DISCORD_WEBHOOK_URL"
