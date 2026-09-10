@@ -51,7 +51,10 @@ jobs:
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ env.STORE_PATH }}
-          key: ${{ runner.os }}-${{ inputs.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          # Keep this path anchored to the repository root. A recursive glob is
+          # evaluated again during post-job cleanup, after multi-GB installers
+          # exist, and can exceed GitHub's 120-second hashFiles timeout.
+          key: ${{ runner.os }}-${{ inputs.arch }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-${{ inputs.arch }}-pnpm-store-
 

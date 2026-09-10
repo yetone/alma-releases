@@ -90,6 +90,7 @@ jobs:
     uses: ./.github/workflows/publish-platform.yml
     secrets: inherit
     permissions:
+      actions: read
       contents: write
     with:
       ref: ${{ needs.params.outputs.ref }}
@@ -102,6 +103,7 @@ jobs:
     uses: ./.github/workflows/publish-platform.yml
     secrets: inherit
     permissions:
+      actions: read
       contents: write
     with:
       ref: ${{ needs.params.outputs.ref }}

@@ -23,11 +23,40 @@ on:
         required: false
         type: boolean
         default: false
+      source_run_id:
+        description: 'Run ID containing artifacts; defaults to the caller run'
+        required: false
+        type: string
+        default: ''
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to publish (tag or branch)'
+        required: true
+        type: string
+      version:
+        description: 'Version to publish (e.g., 0.4.33)'
+        required: true
+        type: string
+      artifact_pattern:
+        description: 'Artifact name glob to download (e.g. build-mac-*)'
+        required: true
+        type: string
+      announce:
+        description: 'Post the Discord release note after publishing'
+        required: false
+        type: boolean
+        default: false
+      source_run_id:
+        description: 'Completed Release workflow run containing artifacts'
+        required: true
+        type: string
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: write
 
     steps:
@@ -46,6 +75,8 @@ jobs:
         with:
           path: dist-artifacts
           pattern: ${{ inputs.artifact_pattern }}
+          run-id: ${{ inputs.source_run_id || github.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Belt and braces: whatever the download pattern matched, a leg must
       # never publish the other leg's files — a win/linux publish that caught a
