@@ -273,6 +273,7 @@ jobs:
             dist-electron/*.deb
             dist-electron/*.rpm
             dist-electron/*.AppImage
+            dist-electron/*.tar.gz
             dist-electron/*.yml
             dist-electron/*.blockmap
 

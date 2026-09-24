@@ -144,6 +144,14 @@ jobs:
           USE_SYSTEM_FPM: ${{ inputs.platform == 'linux' && inputs.arch == 'arm64' && 'true' || '' }}
         run: pnpm run make -- --${{ inputs.arch }}
 
+      # Linux: the headless server (alma-server-<version>-linux-<arch>.tar.gz),
+      # packaged with this runner's Node so its native modules match that ABI.
+      - name: Package headless server
+        if: inputs.platform == 'linux'
+        env:
+          NODE_OPTIONS: --max_old_space_size=8192
+        run: pnpm build:server && pnpm build:web && pnpm package:server
+
       # Upload artifacts for the publish job
       - name: Upload build artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -156,6 +164,7 @@ jobs:
             dist-electron/*.deb
             dist-electron/*.rpm
             dist-electron/*.AppImage
+            dist-electron/*.tar.gz
             dist-electron/*.yml
             dist-electron/*.blockmap
           if-no-files-found: error
