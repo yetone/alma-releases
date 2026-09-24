@@ -84,6 +84,18 @@ jobs:
       # only ONE architecture, breaking updates for the other.
       - name: Enforce leg isolation
         run: |
+          # A pattern matching exactly ONE artifact is extracted flat into
+          # dist-artifacts/ (no per-artifact folder), so the copy steps below
+          # would find nothing. Put the files back under the artifact's name.
+          pattern="${{ inputs.artifact_pattern }}"
+          case "$pattern" in
+            *'*'*|*'?'*|*'['*) ;;
+            *)
+              if [ -n "$pattern" ] && [ ! -d "dist-artifacts/$pattern" ] && [ -n "$(ls -A dist-artifacts 2>/dev/null)" ]; then
+                mkdir -p "/tmp/$pattern" && mv dist-artifacts/* "/tmp/$pattern/" && mv "/tmp/$pattern" "dist-artifacts/$pattern"
+              fi
+              ;;
+          esac
           case "${{ inputs.artifact_pattern }}" in
             build-mac-*)
               rm -rf dist-artifacts/build-win-* dist-artifacts/build-linux-*
