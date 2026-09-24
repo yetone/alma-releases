@@ -5,6 +5,25 @@ name: Build Platform
 # matrix) — win/linux publish no longer waits for the slow mac builds.
 
 on:
+  # Manual runs build and upload artifacts only — nothing is published. Used to
+  # prove out a new platform/arch before it joins release.yml.
+  workflow_dispatch:
+    inputs:
+      os:
+        required: true
+        type: string
+      platform:
+        required: true
+        type: string
+      arch:
+        required: true
+        type: string
+      ref:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
   workflow_call:
     inputs:
       os:
@@ -75,6 +94,14 @@ jobs:
         if: inputs.platform == 'linux'
         run: sudo apt-get update && sudo apt-get install -y rpm
 
+      # electron-builder's bundled fpm is x86_64-only; on arm64 runners the
+      # deb/rpm targets use a system fpm instead (USE_SYSTEM_FPM in Build).
+      - name: Install fpm (linux arm64)
+        if: inputs.platform == 'linux' && inputs.arch == 'arm64'
+        run: |
+          sudo apt-get install -y ruby ruby-dev build-essential
+          sudo gem install fpm --no-document
+
       # macOS: Import certificates for code signing
       - name: Import macOS certificates
         if: inputs.platform == 'mac'
@@ -114,6 +141,7 @@ jobs:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           VITE_PUBLIC_POSTHOG_KEY: ${{ secrets.VITE_PUBLIC_POSTHOG_KEY }}
           VITE_PUBLIC_POSTHOG_HOST: ${{ secrets.VITE_PUBLIC_POSTHOG_HOST }}
+          USE_SYSTEM_FPM: ${{ inputs.platform == 'linux' && inputs.arch == 'arm64' && 'true' || '' }}
         run: pnpm run make -- --${{ inputs.arch }}
 
       # Upload artifacts for the publish job
