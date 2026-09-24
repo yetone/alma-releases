@@ -143,6 +143,8 @@ jobs:
           VITE_PUBLIC_POSTHOG_HOST: ${{ secrets.VITE_PUBLIC_POSTHOG_HOST }}
         # electron-builder switches to a system fpm whenever USE_SYSTEM_FPM is
         # set at all, even to an empty string, so export it on arm64 only.
+        # bash on every OS: Windows defaults to pwsh, which cannot parse this.
+        shell: bash
         run: |
           if [ "${{ inputs.platform }}" = linux ] && [ "${{ inputs.arch }}" = arm64 ]; then export USE_SYSTEM_FPM=true; fi
           pnpm run make -- --${{ inputs.arch }}
