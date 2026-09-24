@@ -152,6 +152,7 @@ jobs:
           # Copy win & linux artifacts
           cp dist-artifacts/build-win-x64/* dist-electron/ 2>/dev/null || true
           cp dist-artifacts/build-linux-x64/* dist-electron/ 2>/dev/null || true
+          cp dist-artifacts/build-linux-arm64/* dist-electron/ 2>/dev/null || true
 
           rm -rf dist-artifacts
           echo "=== All artifacts ==="

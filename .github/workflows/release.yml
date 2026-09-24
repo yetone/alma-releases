@@ -85,8 +85,20 @@ jobs:
       ref: ${{ needs.params.outputs.ref }}
       version: ${{ needs.params.outputs.version }}
 
+  build-linux-arm64:
+    needs: params
+    uses: ./.github/workflows/build-platform.yml
+    secrets: inherit
+    with:
+      # Built natively on an arm runner so native modules match the target.
+      os: ubuntu-24.04-arm
+      platform: linux
+      arch: arm64
+      ref: ${{ needs.params.outputs.ref }}
+      version: ${{ needs.params.outputs.version }}
+
   publish-win-linux:
-    needs: [params, build-win-x64, build-linux-x64]
+    needs: [params, build-win-x64, build-linux-x64, build-linux-arm64]
     uses: ./.github/workflows/publish-platform.yml
     secrets: inherit
     permissions:
