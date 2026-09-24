@@ -141,8 +141,11 @@ jobs:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           VITE_PUBLIC_POSTHOG_KEY: ${{ secrets.VITE_PUBLIC_POSTHOG_KEY }}
           VITE_PUBLIC_POSTHOG_HOST: ${{ secrets.VITE_PUBLIC_POSTHOG_HOST }}
-          USE_SYSTEM_FPM: ${{ inputs.platform == 'linux' && inputs.arch == 'arm64' && 'true' || '' }}
-        run: pnpm run make -- --${{ inputs.arch }}
+        # electron-builder switches to a system fpm whenever USE_SYSTEM_FPM is
+        # set at all, even to an empty string, so export it on arm64 only.
+        run: |
+          if [ "${{ inputs.platform }}" = linux ] && [ "${{ inputs.arch }}" = arm64 ]; then export USE_SYSTEM_FPM=true; fi
+          pnpm run make -- --${{ inputs.arch }}
 
       # Linux: the headless server (alma-server-<version>-linux-<arch>.tar.gz),
       # packaged with this runner's Node so its native modules match that ABI.
