@@ -79,7 +79,9 @@ jobs:
     uses: ./.github/workflows/build-platform.yml
     secrets: inherit
     with:
-      os: ubuntu-latest
+      # Pinned: on ubuntu-26.04 (ubuntu-latest since 0.4.212) electron-builder's
+      # bundled fpm fails in rpmbuild with no message, so no Linux x64 packages.
+      os: ubuntu-24.04
       platform: linux
       arch: x64
       ref: ${{ needs.params.outputs.ref }}
