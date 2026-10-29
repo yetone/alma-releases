@@ -184,7 +184,10 @@ jobs:
         shell: bash
         run: |
           if [ "${{ inputs.platform }}" = linux ] && [ "${{ inputs.arch }}" = arm64 ]; then export USE_SYSTEM_FPM=true; fi
-          pnpm run make -- --${{ inputs.arch }}
+          # No `--` before the flag: pnpm would pass it through, and
+          # electron-builder takes everything after `--` as stray positionals,
+          # silently building the runner's own CPU instead.
+          pnpm run make --${{ inputs.arch }}
 
       # Every binary the app loads must be built for the CPU it ships to. A
       # wrong-arch .node only fails on a user's machine, at require time.
