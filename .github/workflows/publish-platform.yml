@@ -9,7 +9,9 @@ name: Publish Platform
 #   1. every url a feed lists must be staged (step: Verify every advertised…),
 #   2. artifacts upload to R2 before the feeds that advertise them,
 #   3. the public host must serve each file with the staged byte count, then
-#   4. the GitHub release must carry the same files.
+#   4. the GitHub release must carry the same files, and
+#   5. the announcing (mac) leg refuses to announce until all four feeds serve
+#      this version with the sizes they promise.
 # Skipping any of these is how v0.4.231 published a latest-mac.yml pointing at
 # a .dmg that did not exist for 3h11m (alma postmortem 291).
 
@@ -370,7 +372,7 @@ jobs:
             name=$(basename "$entry")
             want=$(stat -c%s "$entry")
             code=""; got=""
-            for attempt in 1 2 3 4 5; do
+            for _ in 1 2 3 4 5; do
               headers=$(curl -sS -I --max-time 30 "$UPDATES_BASE_URL/$name" || true)
               code=$(printf '%s\n' "$headers" | head -1 | awk '{print $2}')
               got=$(printf '%s\n' "$headers" | tr -d '\r' | awk 'tolower($1) == "content-length:" {print $2; exit}')
@@ -440,6 +442,86 @@ jobs:
             exit 1
           fi
           echo "release v${{ inputs.version }} carries every staged artifact"
+
+      # The mac leg lands last, so at this point every platform should already be
+      # on this version. v0.4.231 announced a mac feed that pointed at a .dmg
+      # which did not exist for 3h11m; this read-back would have refused to
+      # announce it (alma postmortem 291). Runs before the Discord message, so a
+      # broken convergence leaves the release silent instead of paged.
+      - name: Verify every feed converged on this version
+        if: success() && inputs.announce
+        shell: bash
+        env:
+          UPDATES_BASE_URL: https://updates.alma.now
+        run: |
+          set -euo pipefail
+          expected="${{ inputs.version }}"
+          problems=0
+          for feed in latest.yml latest-mac.yml latest-linux.yml latest-linux-arm64.yml; do
+            body=$(curl -fsS --max-time 30 -H 'Cache-Control: no-cache' "$UPDATES_BASE_URL/$feed" || true)
+            if [ -z "$body" ]; then
+              echo "::error::$feed could not be fetched from $UPDATES_BASE_URL"
+              problems=$((problems + 1))
+              continue
+            fi
+
+            version=$(printf '%s\n' "$body" | awk '/^version:[[:space:]]*/ { sub(/^version:[[:space:]]*/, ""); print; exit }')
+            if [ "$version" != "$expected" ]; then
+              echo "::error::$feed reports version '$version', expected '$expected'"
+              problems=$((problems + 1))
+              continue
+            fi
+
+            # Pair each files: entry's url with its size, ignoring releaseNotes
+            # (an indented block scalar whose markdown may contain "- url:").
+            checked=0
+            while IFS=' ' read -r url size; do
+              [ -n "$url" ] || continue
+              checked=$((checked + 1))
+              code=""
+              got=""
+              for _ in 1 2 3 4 5; do
+                headers=$(curl -sS -I --max-time 30 "$UPDATES_BASE_URL/$url" || true)
+                code=$(printf '%s\n' "$headers" | head -1 | awk '{print $2}')
+                got=$(printf '%s\n' "$headers" | tr -d '\r' | awk 'tolower($1) == "content-length:" {print $2; exit}')
+                if [ "$code" = "200" ] && { [ -z "$size" ] || [ "$got" = "$size" ]; }; then break; fi
+                sleep 3
+              done
+              if [ "$code" != "200" ]; then
+                echo "::error file=$url::$UPDATES_BASE_URL/$url answered HTTP $code"
+                problems=$((problems + 1))
+              elif [ -n "$size" ] && [ "$got" != "$size" ]; then
+                echo "::error file=$url::$UPDATES_BASE_URL/$url serves $got bytes, $feed says $size"
+                problems=$((problems + 1))
+              fi
+            done < <(printf '%s\n' "$body" | awk '
+                       /^files:[[:space:]]*$/ { in_files = 1; next }
+                       in_files && /^[^[:space:]]/ { in_files = 0 }
+                       in_files && /^[[:space:]]*-[[:space:]]*url:/ {
+                         url = $0
+                         sub(/^[[:space:]]*-[[:space:]]*url:[[:space:]]*/, "", url)
+                         sub(/[[:space:]]+$/, "", url)
+                       }
+                       in_files && /^[[:space:]]+size:[[:space:]]*/ {
+                         size = $0
+                         sub(/^[[:space:]]*size:[[:space:]]*/, "", size)
+                         if (url != "") { print url " " size; url = "" }
+                       }
+                     ')
+
+            if [ "$checked" -eq 0 ]; then
+              echo "::error::$feed lists no artifacts"
+              problems=$((problems + 1))
+            else
+              echo "$feed: v$version, $checked artifact(s) served"
+            fi
+          done
+
+          if [ "$problems" -ne 0 ]; then
+            echo "::error::feeds are not converged on v$expected — refusing to announce"
+            exit 1
+          fi
+          echo "all feeds are converged on v$expected and serve every listed artifact"
 
       - name: Post to Discord #release-notes
         # Only the mac leg announces — it finishes last, so the release is
