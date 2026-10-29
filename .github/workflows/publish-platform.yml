@@ -458,12 +458,21 @@ jobs:
           expected="${{ inputs.version }}"
           problems=0
           for feed in latest.yml latest-mac.yml latest-linux.yml latest-linux-arm64.yml; do
-            body=$(curl -fsS --max-time 30 -H 'Cache-Control: no-cache' "$UPDATES_BASE_URL/$feed" || true)
-            if [ -z "$body" ]; then
-              echo "::error::$feed could not be fetched from $UPDATES_BASE_URL"
+            code=$(curl -sS --max-time 30 -H 'Cache-Control: no-cache' -o /tmp/feed.yml \
+                     -w '%{http_code}' "$UPDATES_BASE_URL/$feed" || true)
+            # Releases before the linux arm64 leg existed never published this
+            # feed (v0.4.100 has none). Re-announcing such a tag must not fail
+            # the gate, so a 404 here is only a warning.
+            if [ "$code" = "404" ] && [ "$feed" = "latest-linux-arm64.yml" ]; then
+              echo "::warning::$feed is not published for this release — skipped"
+              continue
+            fi
+            if [ "$code" != "200" ]; then
+              echo "::error::$feed answered HTTP $code from $UPDATES_BASE_URL"
               problems=$((problems + 1))
               continue
             fi
+            body=$(cat /tmp/feed.yml)
 
             version=$(printf '%s\n' "$body" | awk '/^version:[[:space:]]*/ { sub(/^version:[[:space:]]*/, ""); print; exit }')
             if [ "$version" != "$expected" ]; then
