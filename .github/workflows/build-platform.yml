@@ -227,7 +227,7 @@ jobs:
           prefix=$([ "${{ inputs.arch }}" = x64 ] && echo "arch -x86_64" || echo "arch -arm64")
           ELECTRON_RUN_AS_NODE=1 SMOKE_ARCH="${{ inputs.arch }}" SMOKE_RES="$res" SMOKE_MODULES="$REBUILD_MODULES" $prefix "$exe" -e '
             const path = require("path");
-            const res = process.env.SMOKE_RES;
+            const res = path.resolve(process.env.SMOKE_RES);
             console.log("electron", process.versions.electron, process.arch);
             if (process.arch !== process.env.SMOKE_ARCH) throw new Error("running as " + process.arch);
             for (const name of process.env.SMOKE_MODULES.split(",").filter(Boolean)) {
