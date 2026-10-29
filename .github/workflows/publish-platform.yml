@@ -65,6 +65,13 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # One publish per leg at a time. Two releases tagged close together used to
+    # race: v0.4.240's mac leg finished after v0.4.241's win/linux leg and
+    # failed convergence, and whichever run finished last took "Latest".
+    concurrency:
+      group: publish-${{ inputs.artifact_pattern }}
+      cancel-in-progress: false
     permissions:
       actions: read
       contents: write
@@ -307,6 +314,33 @@ jobs:
             fi
           done
 
+      # Feeds only move forward. A slow or re-run older release must not put
+      # its latest*.yml over a newer one on the CDN and downgrade everyone; it
+      # still uploads its artifacts and gets its GitHub release.
+      - name: Hold back feeds a newer release already published
+        id: feeds
+        shell: bash
+        env:
+          UPDATES_BASE_URL: https://updates.alma.now
+        run: |
+          set -euo pipefail
+          this="${{ inputs.version }}"
+          : > /tmp/held-feeds
+          for entry in dist-electron/latest*.yml; do
+            [ -f "$entry" ] || continue
+            feed=$(basename "$entry")
+            live=$(curl -sS --max-time 30 -H 'Cache-Control: no-cache' "$UPDATES_BASE_URL/$feed" 2>/dev/null \
+                     | awk '/^version:[[:space:]]*/ { sub(/^version:[[:space:]]*/, ""); print; exit }' || true)
+            if [ -n "$live" ] && [ "$live" != "$this" ] && \
+               [ "$(printf '%s\n%s\n' "$live" "$this" | sort -V | tail -1)" = "$live" ]; then
+              echo "::warning::$feed already serves v$live, newer than v$this — not replacing it"
+              echo "$feed" >> /tmp/held-feeds
+            else
+              echo "$feed: live ${live:-none} -> v$this"
+            fi
+          done
+          if grep -qx 'latest-mac.yml' /tmp/held-feeds; then echo "mac_held=true" >> "$GITHUB_OUTPUT"; fi
+
       # Upload to Cloudflare R2 (all files in parallel)
       - name: Configure AWS CLI for R2
         run: |
@@ -330,7 +364,8 @@ jobs:
           for entry in dist-electron/*; do
             [ -f "$entry" ] || continue
             case "$(basename "$entry")" in
-              latest*.yml) feeds+=("$(basename "$entry")") ;;
+              latest*.yml)
+                grep -qx "$(basename "$entry")" /tmp/held-feeds || feeds+=("$(basename "$entry")") ;;
               *) artifacts+=("$(basename "$entry")") ;;
             esac
           done
@@ -387,6 +422,7 @@ jobs:
           for entry in dist-electron/*; do
             [ -f "$entry" ] || continue
             name=$(basename "$entry")
+            grep -qx "$name" /tmp/held-feeds && continue
             want=$(stat -c%s "$entry")
             code=""; got=""
             for _ in 1 2 3 4 5; do
@@ -411,12 +447,29 @@ jobs:
             exit 1
           fi
 
+      # "Latest" on GitHub goes to the newest version, not the last to finish.
+      - name: Decide whether this is the latest release
+        id: latest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          this="${{ inputs.version }}"
+          current=$(gh api "repos/${{ github.repository }}/releases/latest" --jq .tag_name 2>/dev/null | sed 's/^v//' || true)
+          if [ -z "$current" ] || [ "$(printf '%s\n%s\n' "$current" "$this" | sort -V | tail -1)" = "$this" ]; then
+            echo "make_latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::v$current is already the latest release; v$this will not take it"
+            echo "make_latest=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create Release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
           tag_name: v${{ inputs.version }}
           name: Alma v${{ inputs.version }}
           draft: false
+          make_latest: ${{ steps.latest.outputs.make_latest }}
           generate_release_notes: false
           body_path: /tmp/changelog.md
           files: |
@@ -466,7 +519,7 @@ jobs:
       # announce it (alma postmortem 291). Runs before the Discord message, so a
       # broken convergence leaves the release silent instead of paged.
       - name: Verify every feed converged on this version
-        if: success() && inputs.announce
+        if: success() && inputs.announce && steps.feeds.outputs.mac_held != 'true'
         shell: bash
         env:
           UPDATES_BASE_URL: https://updates.alma.now
@@ -576,7 +629,9 @@ jobs:
         # point the R2 feed and GitHub release are already live (v0.0.975 was
         # fully published yet showed as 'failure' because only this step 4xx'd).
         continue-on-error: true
-        if: success() && inputs.announce
+        # A held-back mac feed means a newer release is already out; announcing
+        # this one now would point people backwards.
+        if: success() && inputs.announce && steps.feeds.outputs.mac_held != 'true'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
         run: |
