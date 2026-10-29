@@ -54,7 +54,11 @@ jobs:
     uses: ./.github/workflows/build-platform.yml
     secrets: inherit
     with:
-      os: macos-15-intel
+      # Cross-built on an arm64 runner: the Intel image took ~85 min for the
+      # same build that arm64 finishes in ~35, and every mac release waited on
+      # it. build-platform.yml rebuilds the native modules for x64 and checks
+      # every Mach-O in the app, then loads them under Rosetta.
+      os: macos-latest
       platform: mac
       arch: x64
       ref: ${{ needs.params.outputs.ref }}
