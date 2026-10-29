@@ -473,6 +473,18 @@ jobs:
         run: |
           set -euo pipefail
           expected="${{ inputs.version }}"
+          # True when $1 is an older version than $2 (0.4.9 < 0.4.10). awk, not
+          # `sort -V`, because the BSD tools on a maintainer's Mac lack -V.
+          version_lt() {
+            awk -v a="$1" -v b="$2" 'BEGIN {
+              split(a, x, "."); split(b, y, ".")
+              for (i = 1; i <= 3; i++) {
+                if ((x[i] + 0) < (y[i] + 0)) exit 0
+                if ((x[i] + 0) > (y[i] + 0)) exit 1
+              }
+              exit 1
+            }'
+          }
           problems=0
           for feed in latest.yml latest-mac.yml latest-linux.yml latest-linux-arm64.yml; do
             code=$(curl -sS --max-time 30 -H 'Cache-Control: no-cache' -o /tmp/feed.yml \
@@ -492,10 +504,18 @@ jobs:
             body=$(cat /tmp/feed.yml)
 
             version=$(printf '%s\n' "$body" | awk '/^version:[[:space:]]*/ { sub(/^version:[[:space:]]*/, ""); print; exit }')
-            if [ "$version" != "$expected" ]; then
-              echo "::error::$feed reports version '$version', expected '$expected'"
+            # This leg can finish after the NEXT release has already published
+            # its win/linux feeds (0.4.243's mac leg was blocked because
+            # latest.yml had moved on to 0.4.244). Only a feed that is BEHIND
+            # this release is a defect; a newer one just means we were
+            # overtaken, and the artifacts below are still checked.
+            if version_lt "$version" "$expected"; then
+              echo "::error::$feed is still on $version, behind $expected"
               problems=$((problems + 1))
               continue
+            fi
+            if [ "$version" != "$expected" ]; then
+              echo "::notice::$feed already moved to $version (newer release overtook v$expected)"
             fi
 
             # Pair each files: entry's url with its size, ignoring releaseNotes
@@ -547,7 +567,7 @@ jobs:
             echo "::error::feeds are not converged on v$expected — refusing to announce"
             exit 1
           fi
-          echo "all feeds are converged on v$expected and serve every listed artifact"
+          echo "no feed is behind v$expected and every listed artifact is served"
 
       - name: Post to Discord #release-notes
         # Only the mac leg announces — it finishes last, so the release is
