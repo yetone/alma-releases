@@ -259,15 +259,23 @@ jobs:
           aws configure set aws_secret_access_key ${{ secrets.R2_SECRET_ACCESS_KEY }}
           aws configure set default.region auto
 
+      # Each file gets 4 tries: R2 sometimes loses a part of a big multipart
+      # upload (v0.4.235's linux-arm64 AppImage failed with InvalidPart on
+      # CompleteMultipartUpload), and a fresh upload goes through.
       - name: Upload to Cloudflare R2
         env:
           R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
         run: |
-          ls dist-electron/ | xargs -P 4 -I {} sh -c '
-            echo "Uploading {}..."
-            aws s3 cp "dist-electron/{}" "s3://alma-updates/{}" \
-              --endpoint-url "'"$R2_ENDPOINT"'"
-          '
+          ls dist-electron/ | xargs -P 4 -n 1 sh -c '
+            for attempt in 1 2 3 4; do
+              echo "Uploading $1 (attempt $attempt)..."
+              aws s3 cp "dist-electron/$1" "s3://alma-updates/$1" \
+                --endpoint-url "'"$R2_ENDPOINT"'" && exit 0
+              [ "$attempt" -lt 4 ] && sleep $((attempt * 10))
+            done
+            echo "::error::upload of $1 failed 4 times"
+            exit 1
+          ' sh
           echo "All files uploaded to R2!"
 
       - name: Create Release
