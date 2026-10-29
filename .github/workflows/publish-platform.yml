@@ -4,6 +4,16 @@ name: Publish Platform
 # builds finish (~25min); the mac leg follows when both mac builds are done.
 # Feeds are per-platform files (latest.yml / latest-linux.yml / latest-mac.yml),
 # so partial publishes are safe: each leg only touches its own feed files.
+#
+# Publishing order is load-bearing and now enforced:
+#   1. every url a feed lists must be staged (step: Verify every advertised…),
+#   2. artifacts upload to R2 before the feeds that advertise them,
+#   3. the public host must serve each file with the staged byte count, then
+#   4. the GitHub release must carry the same files, and
+#   5. the announcing (mac) leg refuses to announce until all four feeds serve
+#      this version with the sizes they promise.
+# Skipping any of these is how v0.4.231 published a latest-mac.yml pointing at
+# a .dmg that did not exist for 3h11m (alma postmortem 291).
 
 on:
   workflow_call:
@@ -170,6 +180,48 @@ jobs:
           echo "=== All artifacts ==="
           ls -la dist-electron/
 
+      # A feed is a promise: every url it lists must exist, at that exact byte
+      # count. v0.4.231 shipped a latest-mac.yml advertising
+      # alma-0.4.231-mac-arm64.dmg at 23:24Z while that object only reached R2
+      # at 02:35Z, so every Apple Silicon download on the website 404'd for
+      # 3h11m and mac auto-update was broken (alma postmortem 291). The copy
+      # steps above end in `|| true`, so a missing artifact never failed here.
+      - name: Verify every advertised artifact is staged
+        shell: bash
+        run: |
+          set -euo pipefail
+          problems=0
+          for yml in dist-electron/*.yml; do
+            [ -f "$yml" ] || continue
+            count=0
+            while IFS= read -r url; do
+              count=$((count + 1))
+              if [ ! -s "dist-electron/$url" ]; then
+                echo "::error file=$yml::$yml advertises $url but no such file was staged"
+                problems=$((problems + 1))
+              fi
+            # Only the `files:` block counts: releaseNotes is an indented block
+            # scalar whose markdown may itself contain "- url:" lines.
+            done < <(awk '
+                       /^files:[[:space:]]*$/ { in_files = 1; next }
+                       in_files && /^[^[:space:]]/ { in_files = 0 }
+                       in_files && /^[[:space:]]*-[[:space:]]*url:/ {
+                         sub(/^[[:space:]]*-[[:space:]]*url:[[:space:]]*/, "")
+                         sub(/[[:space:]]+$/, "")
+                         print
+                       }
+                     ' "$yml")
+            if [ "$count" -eq 0 ]; then
+              echo "::error file=$yml::$yml lists no artifacts"
+              problems=$((problems + 1))
+            fi
+            echo "$yml: $count advertised artifact(s) checked"
+          done
+          if [ "$problems" -ne 0 ]; then
+            echo "::error::refusing to publish a feed that points at files we do not have"
+            exit 1
+          fi
+
       # Generate changelog BEFORE uploading so we only upload yml files once
       - name: Get previous tag
         id: prev_tag
@@ -266,17 +318,95 @@ jobs:
         env:
           R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
         run: |
-          ls dist-electron/ | xargs -P 4 -n 1 sh -c '
+          set -euo pipefail
+          # Artifacts first, feeds last. The old `ls | xargs` uploaded in
+          # arbitrary order, so a latest-*.yml could go live while the file it
+          # advertises was still in flight — the v0.4.231 404 window.
+          artifacts=()
+          feeds=()
+          for entry in dist-electron/*; do
+            [ -f "$entry" ] || continue
+            case "$(basename "$entry")" in
+              *.yml) feeds+=("$(basename "$entry")") ;;
+              *) artifacts+=("$(basename "$entry")") ;;
+            esac
+          done
+
+          upload() {
+            name="$1"
             for attempt in 1 2 3 4; do
-              echo "Uploading $1 (attempt $attempt)..."
-              aws s3 cp "dist-electron/$1" "s3://alma-updates/$1" \
-                --endpoint-url "'"$R2_ENDPOINT"'" && exit 0
-              [ "$attempt" -lt 4 ] && sleep $((attempt * 10))
+              echo "Uploading $name (attempt $attempt)..."
+              if aws s3 cp "dist-electron/$name" "s3://alma-updates/$name" --endpoint-url "$R2_ENDPOINT"; then
+                return 0
+              fi
+              if [ "$attempt" -lt 4 ]; then sleep $((attempt * 10)); fi
             done
-            echo "::error::upload of $1 failed 4 times"
-            exit 1
-          ' sh
+            echo "::error::upload of $name failed 4 times"
+            return 1
+          }
+
+          # Bounded pool without xargs: `xargs bash -c '…$1…'` trips shellcheck
+          # (SC2016) and hides which upload failed behind exit code 123.
+          run_pool() {
+            max="$1"
+            shift
+            pids=()
+            for name in "$@"; do
+              upload "$name" &
+              pids+=("$!")
+              if [ "${#pids[@]}" -ge "$max" ]; then
+                wait "${pids[0]}"
+                pids=("${pids[@]:1}")
+              fi
+            done
+            if [ "${#pids[@]}" -gt 0 ]; then
+              for pid in "${pids[@]}"; do wait "$pid"; done
+            fi
+          }
+
+          echo "Uploading ${#artifacts[@]} artifact(s)..."
+          if [ "${#artifacts[@]}" -gt 0 ]; then run_pool 4 "${artifacts[@]}"; fi
+
+          echo "Uploading ${#feeds[@]} feed file(s) last..."
+          if [ "${#feeds[@]}" -gt 0 ]; then run_pool 1 "${feeds[@]}"; fi
+
           echo "All files uploaded to R2!"
+
+      # Pre-upload the yml was checked against the staged files; here the CDN
+      # is checked against the same files, which is what the client sees.
+      - name: Verify the published feed serves every file
+        shell: bash
+        env:
+          UPDATES_BASE_URL: https://updates.alma.now
+        run: |
+          set -euo pipefail
+          problems=0
+          for entry in dist-electron/*; do
+            [ -f "$entry" ] || continue
+            name=$(basename "$entry")
+            want=$(stat -c%s "$entry")
+            code=""; got=""
+            for _ in 1 2 3 4 5; do
+              headers=$(curl -sS -I --max-time 30 "$UPDATES_BASE_URL/$name" || true)
+              code=$(printf '%s\n' "$headers" | head -1 | awk '{print $2}')
+              got=$(printf '%s\n' "$headers" | tr -d '\r' | awk 'tolower($1) == "content-length:" {print $2; exit}')
+              [ "$code" = "200" ] && [ "$got" = "$want" ] && break
+              sleep 3
+            done
+            if [ "$code" != "200" ]; then
+              echo "::error file=$name::$UPDATES_BASE_URL/$name answered HTTP $code after the upload"
+              problems=$((problems + 1))
+            elif [ "$got" != "$want" ]; then
+              echo "::error file=$name::$UPDATES_BASE_URL/$name serves $got bytes, staged file is $want"
+              problems=$((problems + 1))
+            else
+              echo "ok $name ($want bytes)"
+            fi
+          done
+          if [ "$problems" -ne 0 ]; then
+            echo "::error::the published feed does not serve every file it advertises"
+            exit 1
+          fi
 
       - name: Create Release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
@@ -296,6 +426,125 @@ jobs:
             dist-electron/*.tar.gz
             dist-electron/*.yml
             dist-electron/*.blockmap
+
+      # action-gh-release never complains about a `files:` glob that matched no
+      # path — it just uploads fewer assets. Ask the API what actually landed,
+      # so a half-populated release fails here instead of in a user's browser.
+      - name: Verify the GitHub release carries every artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${{ github.repository }}/releases/tags/v${{ inputs.version }}" > /tmp/release.json
+          problems=0
+          for entry in dist-electron/*; do
+            [ -f "$entry" ] || continue
+            name=$(basename "$entry")
+            want=$(stat -c%s "$entry")
+            got=$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .size' /tmp/release.json)
+            if [ -z "$got" ]; then
+              echo "::error file=$name::release v${{ inputs.version }} is missing $name"
+              problems=$((problems + 1))
+            elif [ "$got" != "$want" ]; then
+              echo "::error file=$name::release v${{ inputs.version }} has $name at $got bytes, staged file is $want"
+              problems=$((problems + 1))
+            fi
+          done
+          if [ "$problems" -ne 0 ]; then
+            echo "::error::release v${{ inputs.version }} does not carry every staged artifact"
+            exit 1
+          fi
+          echo "release v${{ inputs.version }} carries every staged artifact"
+
+      # The mac leg lands last, so at this point every platform should already be
+      # on this version. v0.4.231 announced a mac feed that pointed at a .dmg
+      # which did not exist for 3h11m; this read-back would have refused to
+      # announce it (alma postmortem 291). Runs before the Discord message, so a
+      # broken convergence leaves the release silent instead of paged.
+      - name: Verify every feed converged on this version
+        if: success() && inputs.announce
+        shell: bash
+        env:
+          UPDATES_BASE_URL: https://updates.alma.now
+        run: |
+          set -euo pipefail
+          expected="${{ inputs.version }}"
+          problems=0
+          for feed in latest.yml latest-mac.yml latest-linux.yml latest-linux-arm64.yml; do
+            code=$(curl -sS --max-time 30 -H 'Cache-Control: no-cache' -o /tmp/feed.yml \
+                     -w '%{http_code}' "$UPDATES_BASE_URL/$feed" || true)
+            # Releases before the linux arm64 leg existed never published this
+            # feed (v0.4.100 has none). Re-announcing such a tag must not fail
+            # the gate, so a 404 here is only a warning.
+            if [ "$code" = "404" ] && [ "$feed" = "latest-linux-arm64.yml" ]; then
+              echo "::warning::$feed is not published for this release — skipped"
+              continue
+            fi
+            if [ "$code" != "200" ]; then
+              echo "::error::$feed answered HTTP $code from $UPDATES_BASE_URL"
+              problems=$((problems + 1))
+              continue
+            fi
+            body=$(cat /tmp/feed.yml)
+
+            version=$(printf '%s\n' "$body" | awk '/^version:[[:space:]]*/ { sub(/^version:[[:space:]]*/, ""); print; exit }')
+            if [ "$version" != "$expected" ]; then
+              echo "::error::$feed reports version '$version', expected '$expected'"
+              problems=$((problems + 1))
+              continue
+            fi
+
+            # Pair each files: entry's url with its size, ignoring releaseNotes
+            # (an indented block scalar whose markdown may contain "- url:").
+            checked=0
+            while IFS=' ' read -r url size; do
+              [ -n "$url" ] || continue
+              checked=$((checked + 1))
+              code=""
+              got=""
+              for _ in 1 2 3 4 5; do
+                headers=$(curl -sS -I --max-time 30 "$UPDATES_BASE_URL/$url" || true)
+                code=$(printf '%s\n' "$headers" | head -1 | awk '{print $2}')
+                got=$(printf '%s\n' "$headers" | tr -d '\r' | awk 'tolower($1) == "content-length:" {print $2; exit}')
+                if [ "$code" = "200" ] && { [ -z "$size" ] || [ "$got" = "$size" ]; }; then break; fi
+                sleep 3
+              done
+              if [ "$code" != "200" ]; then
+                echo "::error file=$url::$UPDATES_BASE_URL/$url answered HTTP $code"
+                problems=$((problems + 1))
+              elif [ -n "$size" ] && [ "$got" != "$size" ]; then
+                echo "::error file=$url::$UPDATES_BASE_URL/$url serves $got bytes, $feed says $size"
+                problems=$((problems + 1))
+              fi
+            done < <(printf '%s\n' "$body" | awk '
+                       /^files:[[:space:]]*$/ { in_files = 1; next }
+                       in_files && /^[^[:space:]]/ { in_files = 0 }
+                       in_files && /^[[:space:]]*-[[:space:]]*url:/ {
+                         url = $0
+                         sub(/^[[:space:]]*-[[:space:]]*url:[[:space:]]*/, "", url)
+                         sub(/[[:space:]]+$/, "", url)
+                       }
+                       in_files && /^[[:space:]]+size:[[:space:]]*/ {
+                         size = $0
+                         sub(/^[[:space:]]*size:[[:space:]]*/, "", size)
+                         if (url != "") { print url " " size; url = "" }
+                       }
+                     ')
+
+            if [ "$checked" -eq 0 ]; then
+              echo "::error::$feed lists no artifacts"
+              problems=$((problems + 1))
+            else
+              echo "$feed: v$version, $checked artifact(s) served"
+            fi
+          done
+
+          if [ "$problems" -ne 0 ]; then
+            echo "::error::feeds are not converged on v$expected — refusing to announce"
+            exit 1
+          fi
+          echo "all feeds are converged on v$expected and serve every listed artifact"
 
       - name: Post to Discord #release-notes
         # Only the mac leg announces — it finishes last, so the release is
