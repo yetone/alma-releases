@@ -344,18 +344,32 @@ jobs:
             echo "::error::upload of $name failed 4 times"
             return 1
           }
-          export -f upload
-          export R2_ENDPOINT
+
+          # Bounded pool without xargs: `xargs bash -c '…$1…'` trips shellcheck
+          # (SC2016) and hides which upload failed behind exit code 123.
+          run_pool() {
+            max="$1"
+            shift
+            pids=()
+            for name in "$@"; do
+              upload "$name" &
+              pids+=("$!")
+              if [ "${#pids[@]}" -ge "$max" ]; then
+                wait "${pids[0]}"
+                pids=("${pids[@]:1}")
+              fi
+            done
+            if [ "${#pids[@]}" -gt 0 ]; then
+              for pid in "${pids[@]}"; do wait "$pid"; done
+            fi
+          }
 
           echo "Uploading ${#artifacts[@]} artifact(s)..."
-          if [ "${#artifacts[@]}" -gt 0 ]; then
-            printf '%s\n' "${artifacts[@]}" | xargs -P 4 -n 1 bash -c 'upload "$1"' _
-          fi
+          if [ "${#artifacts[@]}" -gt 0 ]; then run_pool 4 "${artifacts[@]}"; fi
 
           echo "Uploading ${#feeds[@]} feed file(s) last..."
-          if [ "${#feeds[@]}" -gt 0 ]; then
-            printf '%s\n' "${feeds[@]}" | xargs -P 1 -n 1 bash -c 'upload "$1"' _
-          fi
+          if [ "${#feeds[@]}" -gt 0 ]; then run_pool 1 "${feeds[@]}"; fi
+
           echo "All files uploaded to R2!"
 
       # Pre-upload the yml was checked against the staged files; here the CDN
