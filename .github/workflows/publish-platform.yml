@@ -191,7 +191,10 @@ jobs:
         run: |
           set -euo pipefail
           problems=0
-          for yml in dist-electron/*.yml; do
+          # Only the update feeds are promises. electron-builder also writes
+          # builder-debug.yml (build metadata, no files: block); the first
+          # release that ran this gate refused to publish because of it.
+          for yml in dist-electron/latest*.yml; do
             [ -f "$yml" ] || continue
             count=0
             while IFS= read -r url; do
@@ -327,7 +330,7 @@ jobs:
           for entry in dist-electron/*; do
             [ -f "$entry" ] || continue
             case "$(basename "$entry")" in
-              *.yml) feeds+=("$(basename "$entry")") ;;
+              latest*.yml) feeds+=("$(basename "$entry")") ;;
               *) artifacts+=("$(basename "$entry")") ;;
             esac
           done
