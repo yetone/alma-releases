@@ -45,6 +45,9 @@ on:
 jobs:
   build:
     runs-on: ${{ inputs.os }}
+    # A hung notarization or upload used to hold the release for the 6-hour
+    # default; the slowest healthy build is ~45 min.
+    timeout-minutes: 120
     steps:
       - name: Checkout alma source code
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
@@ -61,6 +64,32 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4.2.0
 
+      # The mac x64 build runs on an arm64 runner (macos-15-intel took ~85 min
+      # against ~35 for arm64). pnpm installs both CPUs' optional packages —
+      # arm64 to run the build, x64 to ship — and the native modules are
+      # rebuilt for x64 after install. after-pack drops the arm64 copies.
+      - name: Detect cross build
+        shell: bash
+        run: |
+          case "${{ runner.arch }}" in ARM64) host=arm64 ;; X64) host=x64 ;; *) host="${{ runner.arch }}" ;; esac
+          cross=false
+          if [ "${{ inputs.platform }}" = mac ] && [ "$host" != "${{ inputs.arch }}" ]; then cross=true; fi
+          echo "HOST_ARCH=$host" >> "$GITHUB_ENV"
+          echo "CROSS_BUILD=$cross" >> "$GITHUB_ENV"
+          # The native modules postinstall rebuilds for Electron, read from
+          # the ref being built rather than hardcoded here.
+          modules=$(node -e 'const s=require("./package.json").scripts.postinstall||"";const m=/electron-rebuild[^&]*?-o\s+([^\s&]+)/.exec(s);process.stdout.write(m?m[1]:"")')
+          echo "REBUILD_MODULES=$modules" >> "$GITHUB_ENV"
+          echo "host=$host target=${{ inputs.arch }} cross=$cross rebuild=$modules"
+
+      - name: Install both CPUs' packages (cross build)
+        if: env.CROSS_BUILD == 'true'
+        shell: bash
+        run: |
+          [ -f pnpm-workspace.yaml ] && grep -q supportedArchitectures pnpm-workspace.yaml && { echo "pnpm-workspace.yaml already sets supportedArchitectures"; exit 1; }
+          printf '\nsupportedArchitectures:\n  os:\n    - current\n  cpu:\n    - current\n    - %s\n' "${{ inputs.arch }}" >> pnpm-workspace.yaml
+          cat pnpm-workspace.yaml
+
       - name: Get pnpm store directory
         shell: bash
         run: |
@@ -73,12 +102,20 @@ jobs:
           # Keep this path anchored to the repository root. A recursive glob is
           # evaluated again during post-job cleanup, after multi-GB installers
           # exist, and can exceed GitHub's 120-second hashFiles timeout.
-          key: ${{ runner.os }}-${{ inputs.arch }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ inputs.arch }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-${{ inputs.arch }}-pnpm-store-
+            ${{ runner.os }}-${{ runner.arch }}-${{ inputs.arch }}-pnpm-store-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # postinstall built the native modules for the runner's CPU.
+      - name: Rebuild native modules for the target CPU (cross build)
+        if: env.CROSS_BUILD == 'true'
+        shell: bash
+        run: |
+          [ -n "$REBUILD_MODULES" ] || { echo "no electron-rebuild module list in postinstall"; exit 1; }
+          pnpm exec electron-rebuild -f --arch "${{ inputs.arch }}" -o "$REBUILD_MODULES"
 
       # Vendor binaries (bun/uv/rtk/lark-cli) are version-pinned and the
       # download scripts skip anything already present with a matching version
@@ -148,6 +185,57 @@ jobs:
         run: |
           if [ "${{ inputs.platform }}" = linux ] && [ "${{ inputs.arch }}" = arm64 ]; then export USE_SYSTEM_FPM=true; fi
           pnpm run make -- --${{ inputs.arch }}
+
+      # Every binary the app loads must be built for the CPU it ships to. A
+      # wrong-arch .node only fails on a user's machine, at require time.
+      - name: Verify Mach-O architectures
+        if: inputs.platform == 'mac'
+        shell: bash
+        run: |
+          want=$([ "${{ inputs.arch }}" = x64 ] && echo x86_64 || echo arm64)
+          app=$(find dist-electron -maxdepth 2 -name '*.app' -type d | head -1)
+          [ -n "$app" ] || { echo "no .app under dist-electron"; exit 1; }
+          echo "APP_PATH=$app" >> "$GITHUB_ENV"
+          bad=0; warned=0; checked=0
+          while IFS= read -r -d '' f; do
+            archs=$(lipo -archs "$f" 2>/dev/null) || continue
+            checked=$((checked+1))
+            case " $archs " in *" $want "*) continue ;; esac
+            rel=${f#"$app"/}
+            case "$rel" in
+              *.node|Contents/MacOS/*|Contents/Frameworks/*) echo "::error::$rel is [$archs], not $want"; bad=$((bad+1)) ;;
+              *) echo "::warning::$rel is [$archs], not $want"; warned=$((warned+1)) ;;
+            esac
+          done < <(find "$app" -type f \( -name '*.node' -o -name '*.dylib' -o -name '*.so' -o -perm -u+x \) -print0)
+          echo "checked $checked Mach-O files in $app: $bad wrong-arch loadable, $warned wrong-arch other"
+          [ "$checked" -gt 0 ] && [ "$bad" -eq 0 ]
+
+      # Load the native modules in the packaged app's own Electron, as the app
+      # would: an x64 build runs under Rosetta.
+      - name: Smoke-test native modules in the packaged app
+        if: inputs.platform == 'mac'
+        shell: bash
+        run: |
+          if [ "${{ inputs.arch }}" = x64 ] && [ "$HOST_ARCH" = arm64 ] && ! /usr/bin/pgrep -q oahd; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+          exe=$(find "$APP_PATH/Contents/MacOS" -maxdepth 1 -type f -perm -u+x | head -1)
+          res="$APP_PATH/Contents/Resources/app.asar"
+          prefix=$([ "${{ inputs.arch }}" = x64 ] && echo "arch -x86_64" || echo "arch -arm64")
+          ELECTRON_RUN_AS_NODE=1 SMOKE_ARCH="${{ inputs.arch }}" SMOKE_RES="$res" SMOKE_MODULES="$REBUILD_MODULES" $prefix "$exe" -e '
+            const path = require("path");
+            const res = process.env.SMOKE_RES;
+            console.log("electron", process.versions.electron, process.arch);
+            if (process.arch !== process.env.SMOKE_ARCH) throw new Error("running as " + process.arch);
+            for (const name of process.env.SMOKE_MODULES.split(",").filter(Boolean)) {
+              const mod = require(path.join(res, "node_modules", name));
+              if (name === "better-sqlite3") {
+                const v = new mod(":memory:").prepare("select 41 + 1 as v").get().v;
+                if (v !== 42) throw new Error("better-sqlite3 returned " + v);
+              }
+              console.log("ok", name);
+            }
+          '
 
       # Linux: the headless server (alma-server-<version>-linux-<arch>.tar.gz),
       # packaged with this runner's Node so its native modules match that ABI.
