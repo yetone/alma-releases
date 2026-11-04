@@ -248,6 +248,77 @@ jobs:
           NODE_OPTIONS: --max_old_space_size=8192
         run: pnpm build:server && pnpm build:web && pnpm package:server
 
+      # Native modules are compiled on the runner and link against its glibc;
+      # an ELF needing a newer one only fails on the user's machine, at load
+      # time ("GLIBC_2.38 not found" on Ubuntu 22.04 from a 24.04 build).
+      # Check every ELF in the unpacked app and in the server tarball.
+      - name: Verify glibc requirement (linux)
+        if: inputs.platform == 'linux'
+        shell: bash
+        env:
+          MAX_GLIBC: '2.35'
+        run: |
+          # Actions runs bash with -e -o pipefail: a grep that matches nothing
+          # (an ELF with no GLIBC symbols) must not end the step.
+          set +o pipefail
+          echo "runner glibc: $(ldd --version 2>/dev/null | head -1)"
+          scan=$RUNNER_TEMP/glibc-scan
+          rm -rf "$scan" && mkdir -p "$scan"
+          for t in dist-electron/alma-server-*-linux-*.tar.gz; do
+            if [ -f "$t" ]; then tar -xzf "$t" -C "$scan"; else echo "::error::no server tarball"; exit 1; fi
+          done
+          dirs=$(find dist-electron -maxdepth 1 -type d -name 'linux*-unpacked')
+          [ -n "$dirs" ] || { echo "no linux*-unpacked dir under dist-electron"; exit 1; }
+          bad=0; checked=0; overall=0
+          while IFS= read -r -d '' f; do
+            head -c 4 "$f" 2>/dev/null | grep -q 'ELF' || continue
+            v=$(objdump -T "$f" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1 || true)
+            checked=$((checked+1))
+            [ -n "$v" ] || continue
+            overall=$(printf '%s\n%s\n' "$overall" "$v" | sort -V | tail -1)
+            if [ "$(printf '%s\n%s\n' "$MAX_GLIBC" "$v" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
+              case "$f" in
+                # Upstream rtk publishes only a glibc build for aarch64 (2.39
+                # as of v0.29.0). It is a helper CLI run on demand, not loaded
+                # by the app, so it degrades alone; warn until there is a musl one.
+                */resources/rtk/*) echo "::warning::$f requires GLIBC_$v (max allowed $MAX_GLIBC)" ;;
+                *) echo "::error::$f requires GLIBC_$v (max allowed $MAX_GLIBC)"; bad=$((bad+1)) ;;
+              esac
+            fi
+            case "$f" in *.node) echo "  GLIBC_$v  $f" ;; esac
+          done < <(find $dirs "$scan" -type f \( -name '*.node' -o -name '*.so' -o -name '*.so.*' -o -perm -u+x \) -print0)
+          echo "checked $checked ELF files; highest GLIBC required: $overall; over $MAX_GLIBC: $bad"
+          [ "$checked" -gt 0 ] && [ "$bad" -eq 0 ]
+
+      # The runner is the oldest glibc we support (Ubuntu 22.04), so loading the
+      # natives in the packaged app's own Electron here proves they load there.
+      - name: Smoke-test native modules in the packaged app (linux)
+        if: inputs.platform == 'linux'
+        shell: bash
+        run: |
+          dir=$(find dist-electron -maxdepth 1 -type d -name 'linux*-unpacked' | head -1)
+          [ -n "$dir" ] || { echo "no linux*-unpacked dir"; exit 1; }
+          exe=$(find "$dir" -maxdepth 1 -type f -perm -u+x ! -name 'chrome*' ! -name '*.so*' | head -1)
+          [ -n "$exe" ] || { echo "no app executable in $dir"; exit 1; }
+          echo "exe=$exe ($(ldd --version 2>/dev/null | head -1 || true))"
+          ELECTRON_RUN_AS_NODE=1 SMOKE_ARCH="${{ inputs.arch }}" SMOKE_RES="$dir/resources/app.asar" SMOKE_MODULES="$REBUILD_MODULES" "$exe" -e '
+            const path = require("path");
+            const res = path.resolve(process.env.SMOKE_RES);
+            console.log("electron", process.versions.electron, process.arch);
+            if (process.arch !== process.env.SMOKE_ARCH) throw new Error("running as " + process.arch);
+            const names = process.env.SMOKE_MODULES.split(",").filter(Boolean);
+            if (!names.length) throw new Error("no native module list");
+            for (const name of names) {
+              if (name === "alma-notifications") { console.log("skip", name, "(mac/win only)"); continue; }
+              const mod = require(path.join(res, "node_modules", name));
+              if (name === "better-sqlite3") {
+                const v = new mod(":memory:").prepare("select 41 + 1 as v").get().v;
+                if (v !== 42) throw new Error("better-sqlite3 returned " + v);
+              }
+              console.log("ok", name);
+            }
+          '
+
       # Upload artifacts for the publish job
       - name: Upload build artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0

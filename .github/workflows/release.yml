@@ -1,7 +1,5 @@
 name: Release
 
-run-name: Release ${{ github.event.client_payload.version || github.event.inputs.version }}
-
 # Orchestrator: four single-platform builds (build-platform.yml) and two
 # publish legs (publish-platform.yml). Win/Linux go live on their feeds as
 # soon as those builds finish (~25min) instead of waiting for the slow mac
@@ -23,49 +21,6 @@ on:
         type: string
 
 jobs:
-  # Newest tag wins. A release still queued or building is dead weight the moment
-  # a newer version is dispatched — it would only publish an older build and keep
-  # holding runners while the new one waits. So the newest run cancels every older
-  # one up front and the builds wait for that (needs: [supersede, params]).
-  #
-  # Deliberately NOT a workflow-level concurrency group: cancel-in-progress would
-  # also kill a run that is already in its publish leg, and a publish killed
-  # halfway is how a feed ends up advertising a file that was never uploaded.
-  # A run that has started publishing is left alone to finish.
-  #
-  # Run ids are allocated monotonically, so "older" == smaller id — no version
-  # parsing, nothing to get wrong if a tag is retagged.
-  supersede:
-    runs-on: ubuntu-latest
-    continue-on-error: true # housekeeping only; never gate a release on it
-    permissions:
-      actions: write
-    steps:
-      - name: Cancel queued and building releases older than this one
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          CURRENT_RUN_ID: ${{ github.run_id }}
-        run: |
-          # No `set -e`: a hiccup while cancelling must never break a release.
-          cancelled=0
-          for status in queued in_progress; do
-            ids=$(gh api "repos/$REPO/actions/workflows/release.yml/runs?status=$status&per_page=100" \
-                    --jq ".workflow_runs[] | select(.id < ${CURRENT_RUN_ID}) | .id" || true)
-            for run_id in $ids; do
-              publishing=$(gh api "repos/$REPO/actions/runs/$run_id/jobs?per_page=100" \
-                             --jq '[.jobs[] | select(.name | startswith("publish")) | .status] | any(. == "in_progress")' 2>/dev/null || echo false)
-              if [ "$publishing" = "true" ]; then
-                echo "keep $run_id: already publishing"
-                continue
-              fi
-              echo "cancel $run_id: superseded by run $CURRENT_RUN_ID"
-              gh api -X POST "repos/$REPO/actions/runs/$run_id/cancel" > /dev/null || true
-              cancelled=$((cancelled + 1))
-            done
-          done
-          echo "cancelled=$cancelled older release run(s)"
-
   params:
     runs-on: ubuntu-latest
     outputs:
@@ -84,10 +39,7 @@ jobs:
           fi
 
   build-mac-arm64:
-    needs: [supersede, params]
-    # Run even if supersede hiccuped (!cancelled), so housekeeping can never
-    # swallow a release — but still stop if a newer run cancelled this one.
-    if: ${{ !cancelled() && needs.params.result == 'success' }}
+    needs: params
     uses: ./.github/workflows/build-platform.yml
     secrets: inherit
     with:
@@ -98,10 +50,7 @@ jobs:
       version: ${{ needs.params.outputs.version }}
 
   build-mac-x64:
-    needs: [supersede, params]
-    # Run even if supersede hiccuped (!cancelled), so housekeeping can never
-    # swallow a release — but still stop if a newer run cancelled this one.
-    if: ${{ !cancelled() && needs.params.result == 'success' }}
+    needs: params
     uses: ./.github/workflows/build-platform.yml
     secrets: inherit
     with:
@@ -116,10 +65,7 @@ jobs:
       version: ${{ needs.params.outputs.version }}
 
   build-win-x64:
-    needs: [supersede, params]
-    # Run even if supersede hiccuped (!cancelled), so housekeeping can never
-    # swallow a release — but still stop if a newer run cancelled this one.
-    if: ${{ !cancelled() && needs.params.result == 'success' }}
+    needs: params
     uses: ./.github/workflows/build-platform.yml
     secrets: inherit
     with:
@@ -133,31 +79,29 @@ jobs:
       version: ${{ needs.params.outputs.version }}
 
   build-linux-x64:
-    needs: [supersede, params]
-    # Run even if supersede hiccuped (!cancelled), so housekeeping can never
-    # swallow a release — but still stop if a newer run cancelled this one.
-    if: ${{ !cancelled() && needs.params.result == 'success' }}
+    needs: params
     uses: ./.github/workflows/build-platform.yml
     secrets: inherit
     with:
-      # Pinned: on ubuntu-26.04 (ubuntu-latest since 0.4.212) electron-builder's
-      # bundled fpm fails in rpmbuild with no message, so no Linux x64 packages.
-      os: ubuntu-24.04
+      # Pinned to the oldest supported Ubuntu: native modules (better-sqlite3,
+      # node-pty, ...) are compiled here and link against the runner's glibc.
+      # 0.4.428, built on 24.04 (glibc 2.39), failed on Ubuntu 22.04 with
+      # "GLIBC_2.38 not found". build-platform.yml fails any ELF needing more
+      # than GLIBC 2.35. (ubuntu-26.04 also breaks the bundled fpm's rpmbuild.)
+      os: ubuntu-22.04
       platform: linux
       arch: x64
       ref: ${{ needs.params.outputs.ref }}
       version: ${{ needs.params.outputs.version }}
 
   build-linux-arm64:
-    needs: [supersede, params]
-    # Run even if supersede hiccuped (!cancelled), so housekeeping can never
-    # swallow a release — but still stop if a newer run cancelled this one.
-    if: ${{ !cancelled() && needs.params.result == 'success' }}
+    needs: params
     uses: ./.github/workflows/build-platform.yml
     secrets: inherit
     with:
-      # Built natively on an arm runner so native modules match the target.
-      os: ubuntu-24.04-arm
+      # Built natively on an arm runner so native modules match the target;
+      # 22.04 so they need no newer glibc than Ubuntu 22.04 has (see x64).
+      os: ubuntu-22.04-arm
       platform: linux
       arch: arm64
       ref: ${{ needs.params.outputs.ref }}
