@@ -1,0 +1,50 @@
+name: Supersede Smoke
+# Scratch harness: runs the supersede script body verbatim, but instead of
+# cancelling anything it prints what it would cancel, plus probes the cancel
+# endpoint on an already-finished run (403 = missing permission, 409 = fine).
+on:
+  workflow_dispatch:
+
+jobs:
+  supersede:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel queued and building releases older than this one
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -u
+          cancelled=0
+          for status in queued in_progress; do
+            ids=$(gh api "repos/$REPO/actions/workflows/release.yml/runs?status=$status&per_page=100" \
+                    --jq ".workflow_runs[] | select(.id < ${CURRENT_RUN_ID}) | .id" || true)
+            for run_id in $ids; do
+              publishing=$(gh api "repos/$REPO/actions/runs/$run_id/jobs?per_page=100" \
+                             --jq '[.jobs[] | select(.name | startswith("publish")) | .status] | any(. == "in_progress")' 2>/dev/null || echo false)
+              if [ "$publishing" = "true" ]; then
+                echo "keep $run_id: already publishing"
+                continue
+              fi
+              echo "WOULD CANCEL $run_id: superseded by run $CURRENT_RUN_ID"
+              cancelled=$((cancelled + 1))
+            done
+          done
+          echo "cancelled=$cancelled older release run(s)"
+
+      - name: Probe the cancel endpoint (permission check only)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          # 41820258750 already finished. 403 => token cannot cancel at all;
+          # 409 => permission fine, run just is not cancellable anymore.
+          code=$(gh api -X POST "repos/$REPO/actions/runs/41820258750/cancel" --include 2>&1 | head -1 || true)
+          echo "cancel endpoint said: $code"
+          case "$code" in
+            *403*) echo "::error::token lacks actions: write"; exit 1 ;;
+            *) echo "ok: permission path reached" ;;
+          esac
