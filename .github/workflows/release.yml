@@ -1,5 +1,15 @@
 name: Release
 
+run-name: Release ${{ github.event.client_payload.version || github.event.inputs.version }}
+
+# One release at a time, newest wins. A tag dispatched while an older release is
+# still queued or building cancels that older run outright instead of letting it
+# finish and publish stale artifacts — only the newest version ever reaches the
+# publish legs, so the feeds can never be rolled back to an older build.
+concurrency:
+  group: release
+  cancel-in-progress: true
+
 # Orchestrator: four single-platform builds (build-platform.yml) and two
 # publish legs (publish-platform.yml). Win/Linux go live on their feeds as
 # soon as those builds finish (~25min) instead of waiting for the slow mac
