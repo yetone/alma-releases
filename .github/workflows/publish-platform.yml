@@ -354,6 +354,7 @@ jobs:
       - name: Upload to Cloudflare R2
         env:
           R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          UPDATES_BASE_URL: https://updates.alma.now
         run: |
           set -euo pipefail
           # Artifacts first, feeds last. The old `ls | xargs` uploaded in
@@ -370,11 +371,31 @@ jobs:
             esac
           done
 
+          # An exit code of 0 is not proof the object exists. v0.4.441's exe
+          # reached 427.6/427.6 MiB while R2 was failing other multipart
+          # completions, then aws printed neither "upload:" nor "upload failed"
+          # and returned success — the feed went live advertising a 404. So an
+          # upload only counts once the CDN serves the object at the staged size
+          # (the same check the Verify step makes, but before any feed is live).
+          landed() {
+            want=$(stat -c%s "dist-electron/$1")
+            code=""; got=""
+            for _ in 1 2 3 4 5; do
+              headers=$(curl -sS -I --max-time 30 "$UPDATES_BASE_URL/$1" || true)
+              code=$(printf '%s\n' "$headers" | head -1 | tr -d '\r' | awk '{print $2}')
+              got=$(printf '%s\n' "$headers" | tr -d '\r' | awk 'tolower($1) == "content-length:" {print $2; exit}')
+              [ "$code" = "200" ] && [ "$got" = "$want" ] && return 0
+              sleep 3
+            done
+            echo "::warning::$1 is not served at $want bytes after the upload (HTTP ${code:-none}, ${got:-no} bytes)"
+            return 1
+          }
+
           upload() {
             name="$1"
             for attempt in 1 2 3 4; do
               echo "Uploading $name (attempt $attempt)..."
-              if aws s3 cp "dist-electron/$name" "s3://alma-updates/$name" --endpoint-url "$R2_ENDPOINT"; then
+              if aws s3 cp "dist-electron/$name" "s3://alma-updates/$name" --endpoint-url "$R2_ENDPOINT" && landed "$name"; then
                 return 0
               fi
               if [ "$attempt" -lt 4 ]; then sleep $((attempt * 10)); fi
@@ -404,6 +425,14 @@ jobs:
 
           echo "Uploading ${#artifacts[@]} artifact(s)..."
           if [ "${#artifacts[@]}" -gt 0 ]; then run_pool 4 "${artifacts[@]}"; fi
+
+          # Gate the feeds on what is actually served, not on what the pool
+          # reported: a feed must never go live ahead of a file it advertises.
+          missing=0
+          for name in "${artifacts[@]}"; do
+            landed "$name" || { echo "::error::$name is not served; refusing to publish the feeds"; missing=$((missing + 1)); }
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
 
           echo "Uploading ${#feeds[@]} feed file(s) last..."
           if [ "${#feeds[@]}" -gt 0 ]; then run_pool 1 "${feeds[@]}"; fi
