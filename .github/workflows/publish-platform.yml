@@ -501,26 +501,51 @@ jobs:
             echo "make_latest=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Both legs (win/linux and mac) publish into the same release. When they
-      # finish together, each saw no release and each tried to create one; the
-      # loser's create failed with already_exists and took the leg down
-      # (v0.4.491's win/linux leg). Create it here, tolerating the other leg
-      # having just done so; action-gh-release then only uploads into it.
-      - name: Ensure the release exists
+      - name: Create Release
+        id: gh_release
+        continue-on-error: true
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        with:
+          tag_name: v${{ inputs.version }}
+          name: Alma v${{ inputs.version }}
+          draft: false
+          make_latest: ${{ steps.latest.outputs.make_latest }}
+          generate_release_notes: false
+          body_path: /tmp/changelog.md
+          files: |
+            dist-electron/*.dmg
+            dist-electron/*.zip
+            dist-electron/*.exe
+            dist-electron/*.deb
+            dist-electron/*.rpm
+            dist-electron/*.AppImage
+            dist-electron/*.tar.gz
+            dist-electron/*.yml
+            dist-electron/*.blockmap
+
+      - name: Drop this leg's leftover draft
+        if: steps.gh_release.outcome == 'failure'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="v${{ inputs.version }}"
-          for i in 1 2 3 4 5; do
-            gh release view "$tag" -R "${{ github.repository }}" >/dev/null 2>&1 && exit 0
-            gh release create "$tag" -R "${{ github.repository }}" --title "Alma $tag" \
-              --notes-file /tmp/changelog.md --latest=${{ steps.latest.outputs.make_latest }} && exit 0
-            sleep $((i * 3))
+          for i in $(seq 1 12); do
+            gh api "repos/${{ github.repository }}/releases/tags/$tag" >/dev/null 2>&1 && break
+            sleep 10
           done
-          gh release view "$tag" -R "${{ github.repository }}" >/dev/null
+          # The published release wins; a draft for the same tag would take the
+          # retry's uploads instead of it.
+          gh api "repos/${{ github.repository }}/releases?per_page=30" \
+            --jq ".[] | select(.draft and .tag_name == \"$tag\") | .id" |
+            while read -r id; do gh api -X DELETE "repos/${{ github.repository }}/releases/$id"; done
 
-      - name: Create Release
+      # Both legs (win/linux and mac) publish into the same release. Finishing
+      # together, each made its own draft and the second to finalize failed
+      # ("Too many retries"; v0.4.491, v0.4.492). Once the other leg's release
+      # exists, a second run only uploads into it.
+      - name: Create Release (retry once the other leg's release exists)
+        if: steps.gh_release.outcome == 'failure'
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
           tag_name: v${{ inputs.version }}
