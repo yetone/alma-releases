@@ -2,7 +2,10 @@ name: Release
 
 run-name: Release ${{ github.event.client_payload.version || github.event.inputs.version }}
 
-# Orchestrator: four single-platform builds (build-platform.yml) and two
+# Orchestrator: five single-platform builds of the native (mygo) app
+# (build-native-platform.yml; build-platform.yml is the retired Electron
+# build, kept for the record but never again published on these feeds:
+# its updater would take every native install back to Electron) and two
 # publish legs (publish-platform.yml). Win/Linux go live on their feeds as
 # soon as those builds finish (~25min) instead of waiting for the slow mac
 # builds (~50min); the mac leg publishes when both mac architectures are done
@@ -88,12 +91,14 @@ jobs:
     # Run even if supersede hiccuped (!cancelled), so housekeeping can never
     # swallow a release — but still stop if a newer run cancelled this one.
     if: ${{ !cancelled() && needs.params.result == 'success' }}
-    uses: ./.github/workflows/build-platform.yml
+    uses: ./.github/workflows/build-native-platform.yml
     secrets: inherit
     with:
       os: macos-latest
       platform: mac
       arch: arm64
+      target: darwin/arm64
+      artifact: build-mac-arm64
       ref: ${{ needs.params.outputs.ref }}
       version: ${{ needs.params.outputs.version }}
 
@@ -102,7 +107,7 @@ jobs:
     # Run even if supersede hiccuped (!cancelled), so housekeeping can never
     # swallow a release — but still stop if a newer run cancelled this one.
     if: ${{ !cancelled() && needs.params.result == 'success' }}
-    uses: ./.github/workflows/build-platform.yml
+    uses: ./.github/workflows/build-native-platform.yml
     secrets: inherit
     with:
       # Cross-built on an arm64 runner: the Intel image took ~85 min for the
@@ -112,6 +117,8 @@ jobs:
       os: macos-latest
       platform: mac
       arch: x64
+      target: darwin/amd64
+      artifact: build-mac-x64
       ref: ${{ needs.params.outputs.ref }}
       version: ${{ needs.params.outputs.version }}
 
@@ -120,7 +127,7 @@ jobs:
     # Run even if supersede hiccuped (!cancelled), so housekeeping can never
     # swallow a release — but still stop if a newer run cancelled this one.
     if: ${{ !cancelled() && needs.params.result == 'success' }}
-    uses: ./.github/workflows/build-platform.yml
+    uses: ./.github/workflows/build-native-platform.yml
     secrets: inherit
     with:
       # Pinned to windows-2025: windows-latest resolves to the
@@ -129,6 +136,8 @@ jobs:
       os: windows-2025
       platform: win
       arch: x64
+      target: windows/amd64
+      artifact: build-win-x64
       ref: ${{ needs.params.outputs.ref }}
       version: ${{ needs.params.outputs.version }}
 
@@ -137,7 +146,7 @@ jobs:
     # Run even if supersede hiccuped (!cancelled), so housekeeping can never
     # swallow a release — but still stop if a newer run cancelled this one.
     if: ${{ !cancelled() && needs.params.result == 'success' }}
-    uses: ./.github/workflows/build-platform.yml
+    uses: ./.github/workflows/build-native-platform.yml
     secrets: inherit
     with:
       # Pinned to the oldest supported Ubuntu: native modules (better-sqlite3,
@@ -148,6 +157,8 @@ jobs:
       os: ubuntu-22.04
       platform: linux
       arch: x64
+      target: linux/amd64
+      artifact: build-linux-x64
       ref: ${{ needs.params.outputs.ref }}
       version: ${{ needs.params.outputs.version }}
 
@@ -156,7 +167,7 @@ jobs:
     # Run even if supersede hiccuped (!cancelled), so housekeeping can never
     # swallow a release — but still stop if a newer run cancelled this one.
     if: ${{ !cancelled() && needs.params.result == 'success' }}
-    uses: ./.github/workflows/build-platform.yml
+    uses: ./.github/workflows/build-native-platform.yml
     secrets: inherit
     with:
       # Built natively on an arm runner so native modules match the target;
@@ -164,6 +175,8 @@ jobs:
       os: ubuntu-22.04-arm
       platform: linux
       arch: arm64
+      target: linux/arm64
+      artifact: build-linux-arm64
       ref: ${{ needs.params.outputs.ref }}
       version: ${{ needs.params.outputs.version }}
 
