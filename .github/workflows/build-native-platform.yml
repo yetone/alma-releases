@@ -1,0 +1,135 @@
+name: Build Native Platform
+
+# One platform of the mygo native app (desktop-native/, almapack): signed and
+# notarized on macOS, PostHog keys everywhere. The artifact carries the
+# release folder as publish-platform.yml takes it: electron-builder's file
+# names, latest*.yml with `product: alma-native`, zip blockmaps, and on linux
+# the headless server tarball.
+
+on:
+  workflow_call:
+    inputs:
+      os: { required: true, type: string }
+      platform: { required: true, type: string }
+      arch: { required: true, type: string }
+      target: { required: true, type: string }
+      ref: { required: true, type: string }
+      version: { required: false, type: string, default: '' }
+      artifact: { required: true, type: string }
+
+jobs:
+  build:
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 120
+    steps:
+      - name: Checkout alma source code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          repository: yetone/alma
+          token: ${{ secrets.ALMA_REPO_TOKEN }}
+          ref: ${{ inputs.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: 24
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4.2.0
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: desktop-native/go.mod
+          cache-dependency-path: desktop-native/go.sum
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install squashfs-tools (AppImage)
+        if: inputs.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y squashfs-tools
+
+      - name: Import macOS certificates
+        if: inputs.platform == 'mac'
+        env:
+          CERTIFICATE_P12: ${{ secrets.MAC_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          echo "$CERTIFICATE_P12" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          rm -f $RUNNER_TEMP/certificate.p12
+          id=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | sed -nE 's/.*"(Developer ID Application: [^"]*)".*/\1/p' | head -1)
+          [ -n "$id" ] || { echo "::error::no Developer ID Application identity in the certificate"; exit 1; }
+          echo "ALMA_MAC_SIGN_IDENTITY=$id" >> "$GITHUB_ENV"
+
+      - name: Package
+        shell: bash
+        env:
+          NODE_OPTIONS: --max_old_space_size=8192
+          APPLE_ID: ${{ inputs.platform == 'mac' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ inputs.platform == 'mac' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ inputs.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
+          VITE_PUBLIC_POSTHOG_KEY: ${{ secrets.VITE_PUBLIC_POSTHOG_KEY }}
+          VITE_PUBLIC_POSTHOG_HOST: ${{ secrets.VITE_PUBLIC_POSTHOG_HOST }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          version=${{ inputs.version }}
+          [ -n "$version" ] || version=$(node -p 'require("./package.json").version')
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          args=(-version "$version" -vendor fetch -target "${{ inputs.target }}" -require-analytics -rebuild-server)
+          if [ "${{ inputs.platform }}" = mac ]; then
+            args+=(-dmg -require-signing)
+          fi
+          # Every target bundles the Node this job runs (24); the cross-built
+          # mac x64 fetches the same version for x64 from nodejs.org.
+          if [ "${{ inputs.arch }}" = x64 ] && [ "${{ inputs.platform }}" = mac ]; then
+            args+=(-fetch-node "$(node -p 'process.versions.node')")
+          else
+            args+=(-node "$(command -v node)" -self-test)
+          fi
+          cd desktop-native
+          go run ./cmd/almapack "${args[@]}"
+
+      - name: Verify the release folder
+        shell: bash
+        working-directory: desktop-native
+        run: go run ./cmd/almapack -verify build/package/release
+
+      - name: Check signatures (macOS)
+        if: inputs.platform == 'mac'
+        shell: bash
+        working-directory: desktop-native
+        run: |
+          app=$(find build/package/app -maxdepth 2 -name '*.app' -type d | head -1)
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv --verbose=4 "$app" 2>&1 | grep -E 'Authority|TeamIdentifier|Identifier='
+          spctl -a -vvv -t exec "$app"
+          xcrun stapler validate "$app"
+          for d in build/package/release/*.dmg; do xcrun stapler validate "$d"; spctl -a -vvv -t open --context context:primary-signature "$d"; done
+
+      # Linux: the headless server (alma-server-<version>-linux-<arch>.tar.gz),
+      # as the Electron build ships it, with this runner's Node.
+      - name: Package headless server
+        if: inputs.platform == 'linux'
+        env:
+          NODE_OPTIONS: --max_old_space_size=8192
+        run: |
+          node -e 'const p=require("./package.json");p.version=process.argv[1];require("fs").writeFileSync("package.json",JSON.stringify(p,null,2)+"\n")' "$VERSION"
+          pnpm build:server && pnpm build:web && pnpm package:server
+          ls -l dist-electron/alma-server-*-linux-*.tar.gz
+          cp dist-electron/alma-server-*-linux-*.tar.gz desktop-native/build/package/release/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ inputs.artifact }}
+          path: desktop-native/build/package/release/*
+          if-no-files-found: error
