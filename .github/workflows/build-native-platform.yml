@@ -99,7 +99,7 @@ jobs:
           if [ "${{ inputs.arch }}" = x64 ] && [ "${{ inputs.platform }}" = mac ]; then
             args+=(-fetch-node "$(node -p 'process.versions.node')")
           else
-            args+=(-node "$(command -v node)" -self-test)
+            args+=(-node "$(node -p 'process.execPath')" -self-test)
           fi
           cd desktop-native
           go run ./cmd/almapack "${args[@]}"
@@ -129,7 +129,7 @@ jobs:
           NODE_OPTIONS: --max_old_space_size=8192
         run: |
           node -e 'const p=require("./package.json");p.version=process.argv[1];require("fs").writeFileSync("package.json",JSON.stringify(p,null,2)+"\n")' "$VERSION"
-          pnpm build:server && pnpm build:web && pnpm package:server
+          pnpm download-vendors && pnpm build:server && pnpm build:web && pnpm package:server
           ls -l dist-electron/alma-server-*-linux-*.tar.gz
           cp dist-electron/alma-server-*-linux-*.tar.gz desktop-native/build/package/release/
 
