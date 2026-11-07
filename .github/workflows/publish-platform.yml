@@ -161,8 +161,17 @@ jobs:
 
             PATH_LINE=$(grep "^path:" "$ARM64_YML" | head -1)
             SHA512_LINE=$(grep "^sha512:" "$ARM64_YML" | head -1)
+            # The native app's feeds carry `product: alma-native`, and its
+            # updater refuses a feed without it: dropping it here would
+            # strand every native install on this version.
+            PRODUCT_LINE=$(grep "^product:" "$ARM64_YML" | head -1 || true)
+            if [ "$PRODUCT_LINE" != "$(grep "^product:" "$X64_YML" | head -1 || true)" ]; then
+              echo "::error::latest-mac.yml: arm64 and x64 disagree on product (one native, one Electron?)"
+              exit 1
+            fi
 
             echo "$VERSION" > "$MERGED_YML"
+            if [ -n "$PRODUCT_LINE" ]; then echo "$PRODUCT_LINE" >> "$MERGED_YML"; fi
             echo "files:" >> "$MERGED_YML"
             echo "$ARM64_FILES" >> "$MERGED_YML"
             echo "$X64_FILES" >> "$MERGED_YML"
