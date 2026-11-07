@@ -501,6 +501,25 @@ jobs:
             echo "make_latest=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Both legs (win/linux and mac) publish into the same release. When they
+      # finish together, each saw no release and each tried to create one; the
+      # loser's create failed with already_exists and took the leg down
+      # (v0.4.491's win/linux leg). Create it here, tolerating the other leg
+      # having just done so; action-gh-release then only uploads into it.
+      - name: Ensure the release exists
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="v${{ inputs.version }}"
+          for i in 1 2 3 4 5; do
+            gh release view "$tag" -R "${{ github.repository }}" >/dev/null 2>&1 && exit 0
+            gh release create "$tag" -R "${{ github.repository }}" --title "Alma $tag" \
+              --notes-file /tmp/changelog.md --latest=${{ steps.latest.outputs.make_latest }} && exit 0
+            sleep $((i * 3))
+          done
+          gh release view "$tag" -R "${{ github.repository }}" >/dev/null
+
       - name: Create Release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
