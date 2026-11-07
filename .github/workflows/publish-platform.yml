@@ -534,6 +534,9 @@ jobs:
             gh api "repos/${{ github.repository }}/releases/tags/$tag" >/dev/null 2>&1 && break
             sleep 10
           done
+          # No published release: the other leg may still be uploading into
+          # its draft; leave it, and let the retry fail on its own.
+          gh api "repos/${{ github.repository }}/releases/tags/$tag" >/dev/null 2>&1 || exit 0
           # The published release wins; a draft for the same tag would take the
           # retry's uploads instead of it.
           gh api "repos/${{ github.repository }}/releases?per_page=30" \
