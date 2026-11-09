@@ -49,8 +49,17 @@ jobs:
           go-version-file: desktop-native/go.mod
           cache-dependency-path: desktop-native/go.sum
 
+      # Electron, uv and node-gyp headers come from GitHub releases and nodejs.org;
+      # a 504 from either must not sink all four builds.
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        shell: bash
+        run: |
+          for i in 1 2 3 4 5; do
+            pnpm install --frozen-lockfile && exit 0
+            echo "pnpm install failed (attempt $i), retrying in $((i * 30))s"
+            sleep $((i * 30))
+          done
+          exit 1
 
       - name: Install squashfs-tools (AppImage)
         if: inputs.platform == 'linux'
