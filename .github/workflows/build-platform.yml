@@ -48,6 +48,10 @@ jobs:
     # A hung notarization or upload used to hold the release for the 6-hour
     # default; the slowest healthy build is ~45 min.
     timeout-minutes: 120
+    # The vendor download scripts fall back to the GitHub API when
+    # github.com release URLs 504; the token keeps that off the anonymous limit.
+    env:
+      ALMA_DL_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout alma source code
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1

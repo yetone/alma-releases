@@ -21,6 +21,10 @@ jobs:
   build:
     runs-on: ${{ inputs.os }}
     timeout-minutes: 120
+    # The vendor download scripts fall back to the GitHub API when
+    # github.com release URLs 504; the token keeps that off the anonymous limit.
+    env:
+      ALMA_DL_TOKEN: ${{ github.token }}
     steps:
       # The tree is built as the repo has it: CRLF from core.autocrlf would
       # reach scripts and assets almapack bundles.
