@@ -193,6 +193,19 @@ jobs:
       artifact_pattern: 'build-{win,linux}-*'
       announce: false
 
+  # The alma-server Docker image, from the Linux tarballs publish-win-linux
+  # has just put on the release. After the feeds, never in their way.
+  docker-server:
+    needs: [params, publish-win-linux]
+    uses: ./.github/workflows/docker-server.yml
+    secrets: inherit
+    permissions:
+      contents: read
+      packages: write
+    with:
+      ref: ${{ needs.params.outputs.ref }}
+      version: ${{ needs.params.outputs.version }}
+
   publish-mac:
     needs: [params, build-mac-arm64, build-mac-x64]
     uses: ./.github/workflows/publish-platform.yml

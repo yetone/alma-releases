@@ -1,0 +1,112 @@
+name: alma-server image
+
+run-name: alma-server image ${{ inputs.version }}
+
+# ghcr.io/yetone/alma-server:<version> and :latest for linux/amd64 + arm64,
+# from yetone/alma's docker/alma-server/Dockerfile and the alma-server
+# tarballs the release has just published. release.yml calls it once the
+# Linux tarballs are up; run it by hand to rebuild an image.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref of yetone/alma with docker/alma-server (tag or branch)'
+        required: true
+        type: string
+      version:
+        description: 'Released version whose alma-server tarballs go in (e.g. 0.4.778)'
+        required: true
+        type: string
+      latest:
+        description: 'Also tag it latest'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/yetone/alma-server
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout alma's docker/alma-server
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          repository: yetone/alma
+          token: ${{ secrets.ALMA_REPO_TOKEN }}
+          ref: ${{ inputs.ref }}
+          sparse-checkout: docker/alma-server
+          sparse-checkout-cone-mode: false
+
+      - name: Set up QEMU (arm64 on an amd64 runner)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Wait for the alma-server tarballs
+        run: |
+          for arch in x64 arm64; do
+            url="https://github.com/yetone/alma-releases/releases/download/v$VERSION/alma-server-$VERSION-linux-$arch.tar.gz"
+            for i in $(seq 1 30); do
+              curl -fsSLI -o /dev/null "$url" && { echo "ok $url"; continue 2; }
+              sleep 20
+            done
+            echo "::error::$url is not published"; exit 1
+          done
+
+      - name: Build for this runner
+        run: |
+          docker buildx build --load --platform linux/amd64 \
+            --build-arg VERSION="$VERSION" -t alma-server:smoke docker/alma-server
+
+      # The image a user pulls has to start: the server answers on loopback,
+      # serves the web UI, and the CLI inside the container reaches it.
+      - name: Smoke test
+        run: |
+          docker run -d --name alma --network host alma-server:smoke
+          for i in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:23001/api/health >/dev/null 2>&1 && break
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:23001/api/health
+          echo
+          curl -fsS -o /dev/null -w 'web UI %{http_code}\n' http://127.0.0.1:23001/
+          docker exec alma alma-server --version | tee /dev/stderr | grep -F "$VERSION"
+          docker exec alma alma-server status
+          test "$(docker exec alma id -u)" = 1000
+          docker inspect -f '{{.State.Health.Status}}' alma
+
+      - name: Server log
+        if: always()
+        run: docker logs alma 2>&1 | tail -80 || true
+
+      - name: Log in to ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build and push amd64 + arm64
+        env:
+          LATEST: ${{ github.event_name != 'workflow_dispatch' || inputs.latest }}
+        run: |
+          tags=(-t "$IMAGE:$VERSION")
+          [ "$LATEST" = true ] && tags+=(-t "$IMAGE:latest")
+          docker buildx build --push --platform linux/amd64,linux/arm64 \
+            --build-arg VERSION="$VERSION" "${tags[@]}" \
+            --label org.opencontainers.image.source=https://github.com/yetone/alma-releases \
+            --label org.opencontainers.image.description="Alma server: Alma without a desktop" \
+            --label org.opencontainers.image.version="$VERSION" \
+            docker/alma-server
+          docker buildx imagetools inspect "$IMAGE:$VERSION"

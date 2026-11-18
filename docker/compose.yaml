@@ -1,0 +1,20 @@
+# docker compose up -d
+#
+# Host networking on purpose: the server stays on the host's 127.0.0.1 (reach
+# the web UI over `ssh -L`, as with a plain install), and a phone on the same
+# network or on the same Tailscale tailnet connects to the host directly
+# instead of through the relay — in a bridge network it would only ever see
+# the container's own address.
+services:
+  alma:
+    image: ghcr.io/yetone/alma-server:latest
+    container_name: alma
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      ALMA_TOOL_APPROVAL: auto # ask: approve tools from the web UI or the phone
+    volumes:
+      - alma:/home/alma
+
+volumes:
+  alma:
