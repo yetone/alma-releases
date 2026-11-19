@@ -598,9 +598,9 @@ jobs:
           fi
           echo "release v${{ inputs.version }} carries every staged artifact"
 
-      # The mac leg lands last, so at this point every platform should already be
-      # on this version. v0.4.231 announced a mac feed that pointed at a .dmg
-      # which did not exist for 3h11m; this read-back would have refused to
+      # The mac leg usually lands last, so every platform should be on this
+      # version by now, or shortly (the check waits up to 30 min for the other
+      # leg). v0.4.231 announced a mac feed that pointed at a .dmg which did not exist for 3h11m; this read-back would have refused to
       # announce it (alma postmortem 291). Runs before the Discord message, so a
       # broken convergence leaves the release silent instead of paged.
       - name: Verify every feed converged on this version
@@ -623,6 +623,7 @@ jobs:
               exit 1
             }'
           }
+          check_feeds() {
           problems=0
           for feed in latest.yml latest-mac.yml latest-linux.yml latest-linux-arm64.yml; do
             code=$(curl -sS --max-time 30 -H 'Cache-Control: no-cache' -o /tmp/feed.yml \
@@ -699,6 +700,22 @@ jobs:
             else
               echo "$feed: v$version, $checked artifact(s) served"
             fi
+          done
+          return 0
+          }
+
+          # The mac leg usually lands last, but not always: v0.4.866's mac
+          # leg finished while publish-win-linux was still uploading, read
+          # latest.yml and both linux feeds on 0.4.865, and went silent with
+          # every platform live a minute later. A feed behind this version
+          # is waited for (the other leg is still publishing); only one that
+          # stays behind for half an hour refuses the announcement.
+          for attempt in $(seq 1 30); do
+            check_feeds
+            [ "$problems" -eq 0 ] && break
+            [ "$attempt" -eq 30 ] && break
+            echo "::notice::attempt $attempt: $problems problem(s); checking again in 60s"
+            sleep 60
           done
 
           if [ "$problems" -ne 0 ]; then
