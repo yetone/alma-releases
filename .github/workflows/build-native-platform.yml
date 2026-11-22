@@ -92,6 +92,19 @@ jobs:
           [ -n "$id" ] || { echo "::error::no Developer ID Application identity in the certificate"; exit 1; }
           echo "ALMA_MAC_SIGN_IDENTITY=$id" >> "$GITHUB_ENV"
 
+      # whisper.node's prebuilt linux-x64 build runs whisper.cpp on one
+      # thread (a 7 s dictation took ~29 s); this one, with AVX2 and ggml's
+      # thread pool, is what almapack loads on CPUs that have AVX2
+      # (alma scripts/build-whisper-node-linux.sh, almapack whisperAddFast).
+      - name: Build whisper.node (linux x64)
+        if: inputs.platform == 'linux' && inputs.arch == 'x64'
+        shell: bash
+        run: |
+          if [ -f scripts/build-whisper-node-linux.sh ]; then
+            bash scripts/build-whisper-node-linux.sh "$RUNNER_TEMP/whisper-avx2.node"
+            echo "ALMA_WHISPER_BINARY=$RUNNER_TEMP/whisper-avx2.node" >> "$GITHUB_ENV"
+          fi
+
       - name: Package
         shell: bash
         env:
