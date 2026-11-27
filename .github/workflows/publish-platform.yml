@@ -310,6 +310,73 @@ jobs:
           echo "Generated changelog:"
           cat /tmp/changelog.md
 
+      # The GitHub release body carries the notes in Chinese and Japanese too,
+      # each folded under English (Discord: soulz). Alma's update dialog
+      # (desktop-native/internal/nupdate/notes.go, localizeNotes) shows the
+      # UI language's section and English otherwise. GitHub's Atom feed, the
+      # client's fallback when the API rate-limits, keeps <details> and
+      # <summary> but drops their attributes and every HTML comment, so the
+      # summary itself names the language. The feeds' releaseNotes and the
+      # Discord post stay English (/tmp/changelog.md): the Electron updater
+      # reads releaseNotes and would show all three. A failed translation
+      # leaves that language out; a failed step leaves English only.
+      - name: Translate changelog
+        id: translate
+        continue-on-error: true
+        timeout-minutes: 20
+        shell: bash
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          set -euo pipefail
+          rm -f /tmp/release-body.md
+          cp /tmp/changelog.md /tmp/release-body.md.tmp
+          translate() { # lang-name output-file
+            local prompt response out
+            prompt=$(printf '%s\n\n%s\n' "Translate this changelog of Alma (a desktop and mobile AI app) into $1. Keep the markdown exactly as it is: the same headings and heading levels, list items, bold, links and inline code. Translate the headings too. Leave product, platform and feature names that are not ordinary words (Alma, herdr, iOS, Android, macOS, Windows, Linux, model and provider names), code, file names and version numbers as they are. Output ONLY the translated markdown, without any preamble or code fence." "$(cat /tmp/changelog.md)")
+            for attempt in 1 2; do
+              response=$(curl -sS --max-time 240 https://api.deepseek.com/chat/completions \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+                -d "$(jq -n --arg prompt "$prompt" '{
+                  "model": "deepseek-v4-pro",
+                  "messages": [{"role": "user", "content": $prompt}]
+                }')") || response=""
+              out=$(printf '%s' "$response" | python3 -c 'import json,sys; d=json.loads(sys.stdin.read(), strict=False); print(d["choices"][0]["message"]["content"])' 2>/dev/null || true)
+              # Drop a stray code fence, and any details/summary tag that
+              # would end the section early.
+              out=$(printf '%s\n' "$out" | grep -vE '^[[:space:]]*```' | grep -viE '</?(details|summary)[^>]*>' || true)
+              if [ -n "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
+                printf '%s\n' "$out" > "$2"
+                return 0
+              fi
+              echo "::warning::translation into $1 failed (attempt $attempt): $(printf '%s' "$response" | head -c 500)"
+            done
+            return 1
+          }
+          # Each section only if the model answered in that script: Han for
+          # Chinese, kana for Japanese (a Chinese answer has no kana).
+          add() { # lang-attr summary file script-regex
+            if [ -s "$3" ] && python3 -c 'import re,sys; sys.exit(0 if re.search(sys.argv[1], open(sys.argv[2], encoding="utf-8").read()) else 1)' "$4" "$3"; then
+              { printf '\n<details lang="%s">\n<summary>%s</summary>\n\n' "$1" "$2"
+                cat "$3"
+                printf '\n</details>\n'
+              } >> /tmp/release-body.md.tmp
+              echo "added the $2 notes"
+            else
+              echo "::warning::no $2 notes for this release"
+            fi
+          }
+          if translate "Simplified Chinese" /tmp/changelog.zh.md; then
+            add zh-CN 中文 /tmp/changelog.zh.md '[\u4e00-\u9fff]'
+          fi
+          if translate "Japanese" /tmp/changelog.ja.md; then
+            add ja 日本語 /tmp/changelog.ja.md '[\u3040-\u30ff]'
+          fi
+          mv /tmp/release-body.md.tmp /tmp/release-body.md
+          echo "Release body:"
+          cat /tmp/release-body.md
+
       - name: Update latest.yml files with changelog
         run: |
           for yml_file in dist-electron/*.yml; do
@@ -511,7 +578,7 @@ jobs:
           draft: false
           make_latest: ${{ steps.latest.outputs.make_latest }}
           generate_release_notes: false
-          body_path: /tmp/changelog.md
+          body_path: ${{ steps.translate.outcome == 'success' && '/tmp/release-body.md' || '/tmp/changelog.md' }}
           files: |
             dist-electron/*.dmg
             dist-electron/*.zip
@@ -556,7 +623,7 @@ jobs:
           draft: false
           make_latest: ${{ steps.latest.outputs.make_latest }}
           generate_release_notes: false
-          body_path: /tmp/changelog.md
+          body_path: ${{ steps.translate.outcome == 'success' && '/tmp/release-body.md' || '/tmp/changelog.md' }}
           files: |
             dist-electron/*.dmg
             dist-electron/*.zip
