@@ -36,6 +36,16 @@ jobs:
   # halfway is how a feed ends up advertising a file that was never uploaded.
   # A run that has started publishing is left alone to finish.
   #
+  # So is a run whose mac builds have already started. Mac is the slow leg
+  # (~12 min waiting for a runner, then the two arches one after the other,
+  # ~40 min in all) and publishes last; with Alma tagging every 15-40 min,
+  # cancelling those builds meant every run lost its mac leg to the next one:
+  # 0.4.1245-0.4.1250 all shipped win/linux while latest-mac.yml stayed on
+  # 0.4.1244, 1250's mac-arm64 cancelled a minute before it was done. Keeping
+  # it costs nothing on the feeds: they only move forward (publish-platform's
+  # "Hold back feeds a newer release already published"), and the newer run's
+  # mac builds queue behind it on the same runners anyway.
+  #
   # Run ids are allocated monotonically, so "older" == smaller id — no version
   # parsing, nothing to get wrong if a tag is retagged.
   supersede:
@@ -44,7 +54,7 @@ jobs:
     permissions:
       actions: write
     steps:
-      - name: Cancel queued and building releases older than this one
+      - name: Cancel older releases that have not started their mac builds
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -56,10 +66,15 @@ jobs:
             ids=$(gh api "repos/$REPO/actions/workflows/release.yml/runs?status=$status&per_page=100" \
                     --jq ".workflow_runs[] | select(.id < ${CURRENT_RUN_ID}) | .id" || true)
             for run_id in $ids; do
-              publishing=$(gh api "repos/$REPO/actions/runs/$run_id/jobs?per_page=100" \
-                             --jq '[.jobs[] | select(.name | startswith("publish")) | .status] | any(. == "in_progress")' 2>/dev/null || echo false)
+              jobs=$(gh api "repos/$REPO/actions/runs/$run_id/jobs?per_page=100" 2>/dev/null || echo '{"jobs":[]}')
+              publishing=$(printf '%s' "$jobs" | jq '[.jobs[] | select(.name | startswith("publish")) | .status] | any(. == "in_progress")' 2>/dev/null || echo false)
               if [ "$publishing" = "true" ]; then
                 echo "keep $run_id: already publishing"
+                continue
+              fi
+              mac_started=$(printf '%s' "$jobs" | jq '[.jobs[] | select(.name | startswith("build-mac")) | .status] | any(. == "in_progress" or . == "completed")' 2>/dev/null || echo false)
+              if [ "$mac_started" = "true" ]; then
+                echo "keep $run_id: its mac builds are under way (the feeds only move forward)"
                 continue
               fi
               echo "cancel $run_id: superseded by run $CURRENT_RUN_ID"
